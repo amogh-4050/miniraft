@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MiniRAFT Drawing Board</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { background: #fff; display: block; }
+  </style>
+</head>
+<body>
+
+<canvas id="board"></canvas>
+
+<script>
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let drawing = false;
+let lastX = 0;
+let lastY = 0;
+
+// CONFIG
+const color = "black";
+const width = 2;
+
+// 🔌 CONNECT TO GATEWAY
+const ws = new WebSocket("ws://localhost:8080");
+
+ws.onopen = () => {
+  console.log("Connected to gateway");
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  if (msg.type === "stroke") {
+    drawLine(msg.payload);
+  }
+
+  if (msg.type === "init") {
+    const strokes = msg.strokes;   // gateway sends { type:"init", strokes:[{index,term,stroke},...] }
+    strokes.forEach(entry => drawLine(entry.stroke));
+  }
+};
+
+// ✏️ DRAW FUNCTION
+function drawLine({ x0, y0, x1, y1, color, width }) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+}
+
+// 🖱️ MOUSE EVENTS
+canvas.addEventListener("mousedown", (e) => {
+  drawing = true;
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!drawing) return;
+
+  const x = e.clientX;
+  const y = e.clientY;
+
+  const stroke = {
+    type: "stroke",
+    payload: {
+      x0: lastX,
+      y0: lastY,
+      x1: x,
+      y1: y,
+      color,
+      width
+    }
+  };
+
+  // draw locally immediately (smooth UX)
+  drawLine(stroke.payload);
+
+  // send to backend
+  ws.send(JSON.stringify(stroke));
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener("mouseup", () => drawing = false);
+canvas.addEventListener("mouseleave", () => drawing = false);
+
+// 📱 TOUCH SUPPORT
+canvas.addEventListener("touchstart", (e) => {
+  const touch = e.touches[0];
+  drawing = true;
+  lastX = touch.clientX;
+  lastY = touch.clientY;
+});
+
+canvas.addEventListener("touchmove", (e) => {
+  if (!drawing) return;
+
+  const touch = e.touches[0];
+  const x = touch.clientX;
+  const y = touch.clientY;
+
+  const stroke = {
+    type: "stroke",
+    payload: {
+      x0: lastX,
+      y0: lastY,
+      x1: x,
+      y1: y,
+      color,
+      width
+    }
+  };
+
+  drawLine(stroke.payload);
+  ws.send(JSON.stringify(stroke));
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener("touchend", () => drawing = false);
+
+</script>
+
+</body>
+</html>
