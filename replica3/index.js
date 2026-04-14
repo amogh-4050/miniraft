@@ -100,11 +100,8 @@ app.post('/stroke', async (req, res) => {
   console.log(`[${NODE_ID}] stroke committed at index ${entry.index}`);
 
   // Step 4: tell gateway to broadcast to all browsers
-  try {
-    await axios.post(`${GATEWAY_URL}/broadcast`, { stroke }, { timeout: 300 });
-  } catch (err) {
-    console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`);
-  }
+  axios.post(`${GATEWAY_URL}/broadcast`, { stroke }, { timeout: 2000 })
+  .catch(err => console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`));
 
   return res.json({ success: true, index: entry.index });
 });

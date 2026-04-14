@@ -38,6 +38,7 @@ function becomeFollower(term, leaderId = null) {
 }
 
 async function startElection() {
+  if (state.role === 'leader') return;
   state.role = 'candidate';
   state.currentTerm += 1;
   state.votedFor = state.nodeId;
@@ -70,10 +71,12 @@ async function startElection() {
   if (state.role === 'candidate' && votes >= 2) {
     becomeLeader();
   } else if (state.role === 'candidate') {
-    console.log(`[${state.nodeId}] election failed (${votes} votes), back to follower`);
-    state.role = 'follower';
-    state.votedFor = null;
-    resetElectionTimer();
+      state.role = 'follower';
+      state.votedFor = null;
+
+      setTimeout(() => {
+        resetElectionTimer();
+      }, Math.random() * 150);
   }
 }
 
@@ -83,6 +86,7 @@ function becomeLeader() {
   state.leaderId = state.nodeId;
   stopElectionTimer();
   notifyGateway();
+  sendHeartbeats();
   heartbeatTimer = setInterval(() => sendHeartbeats(), HEARTBEAT_INTERVAL);
 }
 
@@ -100,22 +104,32 @@ async function notifyGateway() {
 
 async function sendHeartbeats() {
   if (state.role !== 'leader') return;
+  await Promise.allSettled(
   PEERS.map(async (peer) => {
     try {
       const res = await axios.post(`${peer}/heartbeat`, {
-        term: state.currentTerm, leaderId: state.nodeId, leaderCommit: state.commitIndex,
-      }, { timeout: 200 });
+      term: state.currentTerm,
+      leaderId: state.nodeId,
+      leaderCommit: state.commitIndex,
+    });
       if (res.data.term > state.currentTerm) becomeFollower(res.data.term);
     } catch (err) {
-      console.log(`[${state.nodeId}] heartbeat to ${peer} failed: ${err.message}`);
+      console.log(`[${state.nodeId}] heartbeat to ${peer} failed`);
     }
-  });
+  })
+);
 }
 
 function handleRequestVote(req, res) {
   const { term, candidateId, lastLogIndex, lastLogTerm } = req.body;
   if (term < state.currentTerm) return res.json({ term: state.currentTerm, voteGranted: false });
-  if (term > state.currentTerm) { state.currentTerm = term; state.role = 'follower'; state.votedFor = null; stopHeartbeatTimer(); }
+  if (term > state.currentTerm) { 
+    state.currentTerm = term; 
+    state.role = 'follower'; 
+    state.votedFor = null; 
+    stopHeartbeatTimer(); 
+    resetElectionTimer(); // 🔥 ADD THIS
+}
   if (state.votedFor !== null && state.votedFor !== candidateId) return res.json({ term: state.currentTerm, voteGranted: false });
   const myLastIndex = state.log.length - 1;
   const myLastTerm = myLastIndex >= 0 ? state.log[myLastIndex].term : 0;
@@ -132,7 +146,8 @@ function handleAppendEntries(req, res) {
   if (term < state.currentTerm) return res.json({ term: state.currentTerm, success: false });
   if (term > state.currentTerm) { state.currentTerm = term; state.votedFor = null; }
   state.role = 'follower'; state.leaderId = leaderId;
-  stopHeartbeatTimer(); resetElectionTimer();
+  stopHeartbeatTimer(); 
+  resetElectionTimer();
   if (prevLogIndex >= 0) {
     if (state.log.length <= prevLogIndex || state.log[prevLogIndex].term !== prevLogTerm)
       return res.json({ term: state.currentTerm, success: false, logLength: state.log.length });
@@ -147,7 +162,8 @@ function handleHeartbeat(req, res) {
   if (term < state.currentTerm) return res.json({ term: state.currentTerm, success: false });
   if (term > state.currentTerm) { state.currentTerm = term; state.votedFor = null; }
   state.role = 'follower'; state.leaderId = leaderId;
-  stopHeartbeatTimer(); resetElectionTimer();
+  stopHeartbeatTimer();
+  resetElectionTimer();
   if (leaderCommit > state.commitIndex) state.commitIndex = Math.min(leaderCommit, state.log.length - 1);
   return res.json({ term: state.currentTerm, success: true });
 }
@@ -162,7 +178,9 @@ function handleSyncLog(req, res) {
   return res.json({ term: state.currentTerm, success: true, entries: missingEntries, leaderCommit: state.commitIndex });
 }
 
-resetElectionTimer();
+  setTimeout(() => {
+  resetElectionTimer();
+}, Math.random() * 200);
 console.log(`[${state.nodeId}] RAFT module loaded`);
 
 module.exports = { handleRequestVote, handleAppendEntries, handleHeartbeat, handleSyncLog };

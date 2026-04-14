@@ -5,10 +5,30 @@
   <style>
     body { margin: 0; overflow: hidden; }
     canvas { background: #fff; display: block; }
+    body { margin: 0; overflow: hidden; background: #121212; }
+
+    canvas { background: #121212; display: block; }
+
+    #toolbar {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(30,30,30,0.9);
+      padding: 10px;
+      border-radius: 10px;
+      color: white;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
   </style>
 </head>
 <body>
-
+<div id="toolbar">
+  <input type="color" id="colorPicker">
+  <input type="range" id="brushSize" min="1" max="10" value="2">
+  <button id="clearBtn">Clear</button>
+</div>
 <canvas id="board"></canvas>
 
 <script>
@@ -21,10 +41,42 @@ canvas.height = window.innerHeight;
 let drawing = false;
 let lastX = 0;
 let lastY = 0;
+// Add this near the top of your <script>
+let lastSentAt = 0;
+const THROTTLE_MS = 16; // ~60fps max
 
+canvas.addEventListener("mousemove", (e) => {
+  if (!drawing) return;
+
+  const x = e.clientX;
+  const y = e.clientY;
+
+  const stroke = {
+    type: "stroke",
+    payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
+  };
+
+  drawLine(stroke.payload); // always draw locally for smooth UX
+
+  // only send to backend at most every 16ms
+  const now = Date.now();
+  if (now - lastSentAt >= THROTTLE_MS) {
+    ws.send(JSON.stringify(stroke));
+    lastSentAt = now;
+  }
+
+  lastX = x;
+  lastY = y;
+});
 // CONFIG
-const color = "black";
-const width = 2;
+let userColor = sessionStorage.getItem("color");
+
+if (!userColor) {
+  userColor = `hsl(${Math.random() * 360}, 70%, 50%)`;
+  sessionStorage.setItem("color", userColor);
+}
+
+let width = 2;
 
 // 🔌 CONNECT TO GATEWAY
 const ws = new WebSocket("ws://localhost:8080");
@@ -54,6 +106,8 @@ function drawLine({ x0, y0, x1, y1, color, width }) {
   ctx.moveTo(x0, y0);
   ctx.lineTo(x1, y1);
   ctx.stroke();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
 }
 
 // 🖱️ MOUSE EVENTS
@@ -76,7 +130,7 @@ canvas.addEventListener("mousemove", (e) => {
       y0: lastY,
       x1: x,
       y1: y,
-      color,
+      color: userColor,
       width
     }
   };
@@ -116,7 +170,7 @@ canvas.addEventListener("touchmove", (e) => {
       y0: lastY,
       x1: x,
       y1: y,
-      color,
+      color: userColor,
       width
     }
   };
@@ -130,6 +184,28 @@ canvas.addEventListener("touchmove", (e) => {
 
 canvas.addEventListener("touchend", () => drawing = false);
 
+const colorPicker = document.getElementById("colorPicker");
+const brushSize = document.getElementById("brushSize");
+const clearBtn = document.getElementById("clearBtn");
+
+colorPicker.value = userColor;
+
+colorPicker.addEventListener("input", () => {
+  userColor = colorPicker.value;
+  localStorage.setItem("color", userColor);
+});
+
+brushSize.addEventListener("input", () => {
+  width = brushSize.value;
+});
+
+clearBtn.addEventListener("click", () => {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+});
+
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+}, { passive: false });
 </script>
 
 </body>

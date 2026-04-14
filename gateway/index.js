@@ -17,6 +17,13 @@ const rpc = axios.create({
   timeout: RPC_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
 });
+
+const strokeRpc = axios.create({
+  timeout: 1500,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let leaderUrl = null;
@@ -42,20 +49,20 @@ async function discoverLeader() {
   let bestTerm = -1;
 
   for (const s of statuses) {
+    // CASE 1: node says it's leader
     if (s.role === 'leader' && s.term > bestTerm) {
       bestTerm = s.term;
       bestLeader = s.url;
     }
-  }
+}
 
   if (bestLeader && bestLeader !== leaderUrl) {
     console.log(`[gateway] Leader: ${leaderUrl ?? 'none'} → ${bestLeader} (term ${bestTerm})`);
     leaderUrl = bestLeader;
     drainQueue();
-  } else if (!bestLeader && leaderUrl !== null) {
-    console.warn('[gateway] No leader — election in progress');
-    leaderUrl = null;
-  }
+  } else if (!bestLeader) {
+      console.warn('[gateway] No leader detected (keeping last known leader)');
+}
 }
 
 function startLeaderPolling() {
@@ -70,15 +77,13 @@ function sleep(ms) {
 
 async function forwardStroke(stroke, attempt = 0) {
   if (!leaderUrl) {
-    if (attempt === 0) {
-      strokeQueue.push(stroke);
-      console.warn('[gateway] No leader — stroke queued');
-    }
+    strokeQueue.push(stroke);
+    if (attempt === 0) console.warn('[gateway] No leader — stroke queued');
     return;
   }
 
   try {
-    await rpc.post(`${leaderUrl}/stroke`, { stroke });
+    await strokeRpc.post(`${leaderUrl}/stroke`, { stroke });
   } catch (err) {
     console.warn(`[gateway] Forward failed (attempt ${attempt + 1}): ${err.message}`);
 
@@ -87,9 +92,7 @@ async function forwardStroke(stroke, attempt = 0) {
       return;
     }
 
-    leaderUrl = null;
-    await discoverLeader();
-    await sleep(200);
+    await sleep(200 * (attempt + 1));
     await forwardStroke(stroke, attempt + 1);
   }
 }
@@ -178,6 +181,33 @@ function broadcastToClients(stroke) {
 // ─── Internal HTTP Server (for replicas to push committed strokes) ────────────
 
 const internalServer = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/leader') {
+    let body = '';
+
+    req.on('data', chunk => body += chunk);
+
+    req.on('end', () => {
+      try {
+        const { leaderUrl: newLeaderUrl } = JSON.parse(body);
+
+        console.log(`[gateway] Leader updated → ${newLeaderUrl}`);
+
+        leaderUrl = newLeaderUrl;
+
+        drainQueue();
+
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
+    });
+
+    return;
+}
+
+
   if (req.method === 'POST' && req.url === '/broadcast') {
     let body = '';
     req.on('data', chunk => body += chunk);
