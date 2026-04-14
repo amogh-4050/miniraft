@@ -2,8 +2,8 @@ const axios = require('axios');
 const { state, PEERS, GATEWAY_URL } = require('./index');
 
 const HEARTBEAT_INTERVAL = 150;
-const ELECTION_TIMEOUT_MIN = 300;
-const ELECTION_TIMEOUT_MAX = 500;
+const ELECTION_TIMEOUT_MIN = 500;
+const ELECTION_TIMEOUT_MAX = 800;
 
 let electionTimer = null;
 let heartbeatTimer = null;
