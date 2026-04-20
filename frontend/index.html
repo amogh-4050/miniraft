@@ -314,11 +314,12 @@ canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
 }, { passive: false });
 
+const replicaHost = window.location.hostname || 'localhost';
 const replicas = [
-  "http://localhost:3001",
-  "http://localhost:3002",
-  "http://localhost:3003",
-  "http://localhost:3004"
+  `http://${replicaHost}:3001`,
+  `http://${replicaHost}:3002`,
+  `http://${replicaHost}:3003`,
+  `http://${replicaHost}:3004`,
 ];
 
 let lastLeader = null;
