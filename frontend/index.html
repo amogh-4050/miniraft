@@ -7,7 +7,19 @@
     canvas { background: #fff; display: block; }
     body { margin: 0; overflow: hidden; background: #121212; }
 
-    canvas { background: #121212; display: block; }
+    canvas { background: #111; display: block; }
+
+    #statusPanel {
+    position: fixed;
+    top: 70px;
+    left: 10px;
+    background: rgba(20,20,20,0.9);
+    padding: 10px;
+    border-radius: 10px;
+    color: white;
+    font-size: 14px;
+    min-width: 220px;
+  }
 
     #toolbar {
       position: fixed;
@@ -21,6 +33,104 @@
       gap: 10px;
       align-items: center;
     }
+
+    body {
+  margin: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at top, #1a1a2e, #0f0f1a);
+  font-family: 'Inter', sans-serif;
+}
+
+/* Canvas */
+canvas {
+  background: transparent;
+  display: block;
+}
+
+/* Toolbar */
+#toolbar {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 12px 16px;
+  border-radius: 14px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+}
+
+/* Status Panel */
+#statusPanel {
+  position: fixed;
+  top: 100px;
+  left: 20px;
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 16px;
+  border-radius: 14px;
+  color: white;
+  min-width: 260px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+  /* Title */
+  .status-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+
+  /* Replica Row */
+  .replica {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-radius: 8px;
+    margin-bottom: 5px;
+    transition: 0.2s;
+  }
+
+  .replica:hover {
+    background: rgba(255,255,255,0.05);
+  }
+
+  /* Badges */
+  .badge {
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .leader {
+    background: #4CAF50;
+  }
+
+  .follower {
+    background: #555;
+  }
+
+  .candidate {
+    background: #FFC107;
+  }
+
+  .down {
+    background: #f44336;
+  }
+
+  .leader {
+    background: #4CAF50;
+    box-shadow: 0 0 10px rgba(76,175,80,0.7);
+  }
+
+  .replica {
+    transition: all 0.2s ease;
+  }
   </style>
 </head>
 <body>
@@ -30,37 +140,18 @@
   <button id="clearBtn">Clear</button>
 </div>
 <canvas id="board"></canvas>
+<div id="statusPanel"></div>
 
 <script>
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
+resizeCanvas();
 
 let drawing = false;
 let lastX = 0;
 let lastY = 0;
-canvas.addEventListener("mousemove", (e) => {
-  if (!drawing) return;
 
-  const x = e.clientX;
-  const y = e.clientY;
-  const dx = x - lastX;
-  const dy = y - lastY;
-
-  drawLine({ x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width });
-
-  if (dx * dx + dy * dy >= 9) {
-    ws.send(JSON.stringify({
-      type: "stroke",
-      payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
-    }));
-  }
-
-  lastX = x;
-  lastY = y;
-});
 // CONFIG
 let userColor = sessionStorage.getItem("color");
 
@@ -77,6 +168,8 @@ const ws = new WebSocket(`ws://${wsHost}:8080`);
 
 ws.onopen = () => {
   console.log("Connected to gateway");
+  ws.send(JSON.stringify({ type: "init_request" }));
+  
 };
 
 ws.onmessage = (event) => {
@@ -91,12 +184,24 @@ ws.onmessage = (event) => {
   }
 
   if (msg.type === "init") {
-    const strokes = msg.strokes;
-    strokes.forEach(entry => {
-      if (entry.stroke.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      else drawLine(entry.stroke);
+    if (!msg.strokes) return;
+
+    msg.strokes.forEach(entry => {
+      if (entry.stroke?.clear) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      } else {
+        drawLine(entry.stroke);
+      }
     });
   }
+};
+
+ws.onclose = () => {
+  console.log("WebSocket disconnected");
+};
+
+ws.onerror = (err) => {
+  console.log("WebSocket error", err);
 };
 
 // ✏️ DRAW FUNCTION
@@ -208,6 +313,93 @@ clearBtn.addEventListener("click", () => {
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
 }, { passive: false });
+
+const replicaHost = window.location.hostname || 'localhost';
+const replicas = [
+  `http://${replicaHost}:3001`,
+  `http://${replicaHost}:3002`,
+  `http://${replicaHost}:3003`,
+  `http://${replicaHost}:3004`,
+];
+
+let lastLeader = null;
+
+async function fetchStatus() {
+  const panel = document.getElementById("statusPanel");
+
+  let html = `<div class="status-title">⚡ Cluster Status</div>`;
+  let currentLeader = null;
+
+  for (const url of replicas) {
+    try {
+      const res = await fetch(`${url}/status`);
+      const data = await res.json();
+
+      let roleClass = "follower";
+      let label = "Follower";
+
+      if (data.role === "leader") {
+        roleClass = "leader";
+        label = "Leader 👑";
+        currentLeader = data.nodeId;
+      }
+
+      if (data.role === "candidate") {
+        roleClass = "candidate";
+        label = "Candidate";
+      }
+
+      html += `
+        <div class="replica">
+          <span>${data.nodeId}</span>
+          <span class="badge ${roleClass}">${label}</span>
+        </div>
+      `;
+
+    } catch {
+      html += `
+        <div class="replica">
+          <span>${url.split(":").pop()}</span>
+          <span class="badge down">DOWN ❌</span>
+        </div>
+      `;
+    }
+  }
+
+  if (currentLeader !== lastLeader) {
+    html += `<div style="margin-top:10px;font-size:12px;opacity:0.7">
+      Leader changed → ${currentLeader}
+    </div>`;
+    lastLeader = currentLeader;
+  }
+
+  panel.innerHTML = html;
+}
+
+setInterval(fetchStatus, 1000);
+fetchStatus();
+
+function resizeCanvas() {
+  const ratio = window.devicePixelRatio || 1;
+
+  const temp = document.createElement("canvas");
+  temp.width = canvas.width;
+  temp.height = canvas.height;
+  temp.getContext("2d").drawImage(canvas, 0, 0);
+
+  canvas.width = window.innerWidth * ratio;
+  canvas.height = window.innerHeight * ratio;
+
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+  ctx.drawImage(temp, 0, 0);
+}
+
+// 🔥 listen to resize
+window.addEventListener("resize", resizeCanvas);
 </script>
 
 </body>

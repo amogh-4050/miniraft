@@ -10,6 +10,6 @@ RUN pnpm add -g nodemon
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 CMD ["nodemon", "--delay", "0", "--watch", ".", "--ext", "js,json", "--signal", "SIGTERM", "index.js"]
