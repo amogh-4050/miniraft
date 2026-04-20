@@ -146,8 +146,7 @@ canvas {
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d");
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
+resizeCanvas();
 
 let drawing = false;
 let lastX = 0;
@@ -378,6 +377,28 @@ async function fetchStatus() {
 
 setInterval(fetchStatus, 1000);
 fetchStatus();
+
+function resizeCanvas() {
+  const ratio = window.devicePixelRatio || 1;
+
+  const temp = document.createElement("canvas");
+  temp.width = canvas.width;
+  temp.height = canvas.height;
+  temp.getContext("2d").drawImage(canvas, 0, 0);
+
+  canvas.width = window.innerWidth * ratio;
+  canvas.height = window.innerHeight * ratio;
+
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+  ctx.drawImage(temp, 0, 0);
+}
+
+// 🔥 listen to resize
+window.addEventListener("resize", resizeCanvas);
 </script>
 
 </body>
