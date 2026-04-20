@@ -1,9 +1,10 @@
 {
-  "name": "raft-gateway",
+  "name": "gateway",
   "version": "1.0.0",
-  "packageManager": "pnpm@10.33.0",
+  "type": "module",
   "dependencies": {
-    "ws": "^8.16.0",
-    "axios": "^1.6.0"
+    "axios": "^1.x",
+    "express": "^4.x",
+    "ws": "^8.x"
   }
 }

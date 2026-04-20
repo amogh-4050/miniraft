@@ -5,7 +5,7 @@ app.use(express.json());
 const NODE_ID = process.env.NODE_ID;
 const PORT = parseInt(process.env.PORT);
 const PEERS = process.env.PEERS.split(',');
-const GATEWAY_URL = 'http://gateway:8081';
+const GATEWAY_URL = 'http://gateway:8080';
 const state = {
   nodeId: NODE_ID,
   role: 'follower',

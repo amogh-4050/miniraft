@@ -10,8 +10,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - REPLICAS=http://replica1:3001,http://replica2:3002,http://replica3:3003
-      - PORT=8080
+      REPLICAS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
+      PORT: "8080"
     networks:
       - raft-net
     volumes:
@@ -30,9 +30,9 @@ services:
   replica1:
     build: ./replica1
     environment:
-      - NODE_ID=replica1
-      - PORT=3001
-      - PEERS=http://replica2:3002,http://replica3:3003
+      NODE_ID: "replica1"
+      PORT: "3001"
+      PEERS: "http://replica2:3002,http://replica3:3003"
     networks:
       - raft-net
     volumes:
@@ -52,9 +52,9 @@ services:
   replica2:
     build: ./replica2
     environment:
-      - NODE_ID=replica2
-      - PORT=3002
-      - PEERS=http://replica1:3001,http://replica3:3003
+      NODE_ID: "replica2"
+      PORT: "3002"
+      PEERS: "http://replica1:3001,http://replica3:3003"
     networks:
       - raft-net
     volumes:
@@ -74,9 +74,9 @@ services:
   replica3:
     build: ./replica3
     environment:
-      - NODE_ID=replica3
-      - PORT=3003
-      - PEERS=http://replica1:3001,http://replica2:3002
+      NODE_ID: "replica3"
+      PORT: "3003"
+      PEERS: "http://replica1:3001,http://replica2:3002"
     networks:
       - raft-net
     volumes:
