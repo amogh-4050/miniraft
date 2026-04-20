@@ -7,7 +7,7 @@
     canvas { background: #fff; display: block; }
     body { margin: 0; overflow: hidden; background: #121212; }
 
-    canvas { background: #121212; display: block; }
+    canvas { background: #111; display: block; }
 
     #statusPanel {
     position: fixed;
@@ -152,26 +152,7 @@ canvas.height = window.innerHeight;
 let drawing = false;
 let lastX = 0;
 let lastY = 0;
-canvas.addEventListener("mousemove", (e) => {
-  if (!drawing) return;
 
-  const x = e.clientX;
-  const y = e.clientY;
-  const dx = x - lastX;
-  const dy = y - lastY;
-
-  drawLine({ x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width });
-
-  if (dx * dx + dy * dy >= 9) {
-    ws.send(JSON.stringify({
-      type: "stroke",
-      payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
-    }));
-  }
-
-  lastX = x;
-  lastY = y;
-});
 // CONFIG
 let userColor = sessionStorage.getItem("color");
 
@@ -188,6 +169,8 @@ const ws = new WebSocket(`ws://${wsHost}:8080`);
 
 ws.onopen = () => {
   console.log("Connected to gateway");
+  ws.send(JSON.stringify({ type: "init_request" }));
+  
 };
 
 ws.onmessage = (event) => {
@@ -202,12 +185,24 @@ ws.onmessage = (event) => {
   }
 
   if (msg.type === "init") {
-    const strokes = msg.strokes;
-    strokes.forEach(entry => {
-      if (entry.stroke.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      else drawLine(entry.stroke);
+    if (!msg.strokes) return;
+
+    msg.strokes.forEach(entry => {
+      if (entry.stroke?.clear) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      } else {
+        drawLine(entry.stroke);
+      }
     });
   }
+};
+
+ws.onclose = () => {
+  console.log("WebSocket disconnected");
+};
+
+ws.onerror = (err) => {
+  console.log("WebSocket error", err);
 };
 
 // ✏️ DRAW FUNCTION
