@@ -10,6 +10,7 @@ const NODE_ID = process.env.NODE_ID;
 const PORT = parseInt(process.env.PORT);
 const PEERS = process.env.PEERS.split(',');
 const GATEWAY_URL = 'http://gateway:8081';
+const QUORUM = Math.floor((PEERS.length + 1) / 2) + 1;  // majority of cluster
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -83,14 +84,19 @@ app.post('/stroke', async (req, res) => {
         prevLogTerm,
         leaderCommit: state.commitIndex,
       }, { timeout: 300 });
-      if (r.data.success) acks += 1;
+      if (r.data.success) {
+        acks += 1;
+      } else if (r.data.logLength !== undefined) {
+        // Follower is behind — kick off catch-up (fire and forget, next stroke will succeed)
+        raft.syncFollower(peer, r.data.logLength);
+      }
     } catch (err) {
       console.log(`[${NODE_ID}] append-entries to ${peer} failed: ${err.message}`);
     }
   }));
 
   // Step 3: majority quorum (≥2 of 3) → commit; otherwise roll back to keep logs in sync
-  if (acks < 2) {
+  if (acks < QUORUM) {
     state.log.pop();
     console.log(`[${NODE_ID}] stroke NOT committed (only ${acks} acks) — log rolled back`);
     return res.status(500).json({ error: 'replication failed' });

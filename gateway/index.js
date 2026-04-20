@@ -8,18 +8,19 @@ const PORT = parseInt(process.env.PORT) || 8080;
 const REPLICA_URLS = process.env.REPLICAS.split(',');
 
 const RPC_TIMEOUT_MS = 300;
+const STATUS_TIMEOUT_MS = 600;   // status polls can afford to wait longer
 const LEADER_POLL_INTERVAL_MS = 100;
 const STROKE_RETRY_LIMIT = 3;
 
 // ─── RPC Client ──────────────────────────────────────────────────────────────
 
 const rpc = axios.create({
-  timeout: RPC_TIMEOUT_MS,
+  timeout: STATUS_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
 });
 
 const strokeRpc = axios.create({
-  timeout: 1500,
+  timeout: RPC_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -45,29 +46,48 @@ async function discoverLeader() {
 
   const statuses = (await Promise.all(polls)).filter(Boolean);
 
+  // Clear stale leaderUrl if that node is no longer responding.
+  // This causes forwardStroke to queue immediately instead of burning 1.2s
+  // retrying against a dead URL, and ensures bestLeader !== leaderUrl triggers
+  // a drain when the new leader is found.
+  if (leaderUrl && !statuses.some(s => s.url === leaderUrl)) {
+    console.log(`[gateway] Leader ${leaderUrl} unreachable — clearing`);
+    leaderUrl = null;
+  }
+
   let bestLeader = null;
   let bestTerm = -1;
 
   for (const s of statuses) {
-    // CASE 1: node says it's leader
     if (s.role === 'leader' && s.term > bestTerm) {
       bestTerm = s.term;
       bestLeader = s.url;
     }
-}
+  }
 
   if (bestLeader && bestLeader !== leaderUrl) {
     console.log(`[gateway] Leader: ${leaderUrl ?? 'none'} → ${bestLeader} (term ${bestTerm})`);
     leaderUrl = bestLeader;
     drainQueue();
-  } else if (!bestLeader) {
-      console.warn('[gateway] No leader detected (keeping last known leader)');
+  } else if (!bestLeader && !leaderUrl) {
+    console.warn('[gateway] No leader detected — cluster unavailable');
+  }
 }
+
+async function schedulePoll() {
+  try {
+    await discoverLeader();
+  } catch (err) {
+    console.error('[gateway] discoverLeader threw:', err.message);
+  }
+  // Drain any strokes that were queued after the last leaderUrl update
+  // (e.g. strokes that finished retrying after the leader-change drain ran)
+  if (leaderUrl && strokeQueue.length > 0) drainQueue();
+  leaderPollTimer = setTimeout(schedulePoll, LEADER_POLL_INTERVAL_MS);
 }
 
 function startLeaderPolling() {
-  discoverLeader();
-  leaderPollTimer = setInterval(discoverLeader, LEADER_POLL_INTERVAL_MS);
+  schedulePoll();
 }
 // ─── Stroke Forwarding ───────────────────────────────────────────────────────
 
@@ -82,16 +102,15 @@ async function forwardStroke(stroke, attempt = 0) {
     return;
   }
 
+  const targetUrl = leaderUrl;
   try {
-    await strokeRpc.post(`${leaderUrl}/stroke`, { stroke });
+    await strokeRpc.post(`${targetUrl}/stroke`, { stroke });
   } catch (err) {
-    console.warn(`[gateway] Forward failed (attempt ${attempt + 1}): ${err.message}`);
-
     if (attempt >= STROKE_RETRY_LIMIT) {
-      console.error('[gateway] Stroke dropped after max retries');
+      strokeQueue.push(stroke);
+      console.warn('[gateway] Stroke queued (leader unreachable)');
       return;
     }
-
     await sleep(200 * (attempt + 1));
     await forwardStroke(stroke, attempt + 1);
   }
@@ -103,8 +122,16 @@ async function drainQueue() {
 
   console.log(`[gateway] Draining ${strokeQueue.length} queued strokes`);
   while (strokeQueue.length > 0) {
+    if (!leaderUrl) break;
     const stroke = strokeQueue.shift();
-    await forwardStroke(stroke);
+    try {
+      await strokeRpc.post(`${leaderUrl}/stroke`, { stroke });
+    } catch (err) {
+      // leader gone mid-drain — put it back and stop
+      strokeQueue.unshift(stroke);
+      console.warn('[gateway] Drain interrupted — leader unreachable, will retry on next leader update');
+      break;
+    }
   }
 
   isProcessingQueue = false;
@@ -236,7 +263,7 @@ internalServer.listen(8081, () => {
 function shutdown(signal) {
   console.log(`[gateway] ${signal} received — shutting down`);
 
-  clearInterval(leaderPollTimer);
+  clearTimeout(leaderPollTimer);
   clearInterval(wsHeartbeat);
 
   for (const ws of clients) {

@@ -41,28 +41,21 @@ canvas.height = window.innerHeight;
 let drawing = false;
 let lastX = 0;
 let lastY = 0;
-// Add this near the top of your <script>
-let lastSentAt = 0;
-const THROTTLE_MS = 16; // ~60fps max
-
 canvas.addEventListener("mousemove", (e) => {
   if (!drawing) return;
 
   const x = e.clientX;
   const y = e.clientY;
+  const dx = x - lastX;
+  const dy = y - lastY;
 
-  const stroke = {
-    type: "stroke",
-    payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
-  };
+  drawLine({ x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width });
 
-  drawLine(stroke.payload); // always draw locally for smooth UX
-
-  // only send to backend at most every 16ms
-  const now = Date.now();
-  if (now - lastSentAt >= THROTTLE_MS) {
-    ws.send(JSON.stringify(stroke));
-    lastSentAt = now;
+  if (dx * dx + dy * dy >= 9) {
+    ws.send(JSON.stringify({
+      type: "stroke",
+      payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
+    }));
   }
 
   lastX = x;
@@ -79,7 +72,8 @@ if (!userColor) {
 let width = 2;
 
 // 🔌 CONNECT TO GATEWAY
-const ws = new WebSocket("ws://localhost:8080");
+const wsHost = window.location.hostname || 'localhost';
+const ws = new WebSocket(`ws://${wsHost}:8080`);
 
 ws.onopen = () => {
   console.log("Connected to gateway");
@@ -89,25 +83,32 @@ ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
 
   if (msg.type === "stroke") {
-    drawLine(msg.payload);
+    if (msg.payload.clear) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    } else {
+      drawLine(msg.payload);
+    }
   }
 
   if (msg.type === "init") {
-    const strokes = msg.strokes;   // gateway sends { type:"init", strokes:[{index,term,stroke},...] }
-    strokes.forEach(entry => drawLine(entry.stroke));
+    const strokes = msg.strokes;
+    strokes.forEach(entry => {
+      if (entry.stroke.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      else drawLine(entry.stroke);
+    });
   }
 };
 
 // ✏️ DRAW FUNCTION
 function drawLine({ x0, y0, x1, y1, color, width }) {
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.beginPath();
   ctx.moveTo(x0, y0);
   ctx.lineTo(x1, y1);
   ctx.stroke();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
 }
 
 // 🖱️ MOUSE EVENTS
@@ -200,7 +201,8 @@ brushSize.addEventListener("input", () => {
 });
 
 clearBtn.addEventListener("click", () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);  // clear locally immediately
+  ws.send(JSON.stringify({ type: "stroke", payload: { clear: true } }));
 });
 
 canvas.addEventListener("touchmove", (e) => {
