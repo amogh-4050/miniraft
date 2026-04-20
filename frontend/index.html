@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MiniRAFT Drawing Board</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { background: #fff; display: block; }
+    body { margin: 0; overflow: hidden; background: #121212; }
+
+    canvas { background: #121212; display: block; }
+
+    #toolbar {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(30,30,30,0.9);
+      padding: 10px;
+      border-radius: 10px;
+      color: white;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+<div id="toolbar">
+  <input type="color" id="colorPicker">
+  <input type="range" id="brushSize" min="1" max="10" value="2">
+  <button id="clearBtn">Clear</button>
+</div>
+<canvas id="board"></canvas>
+
+<script>
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let drawing = false;
+let lastX = 0;
+let lastY = 0;
+canvas.addEventListener("mousemove", (e) => {
+  if (!drawing) return;
+
+  const x = e.clientX;
+  const y = e.clientY;
+  const dx = x - lastX;
+  const dy = y - lastY;
+
+  drawLine({ x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width });
+
+  if (dx * dx + dy * dy >= 9) {
+    ws.send(JSON.stringify({
+      type: "stroke",
+      payload: { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width }
+    }));
+  }
+
+  lastX = x;
+  lastY = y;
+});
+// CONFIG
+let userColor = sessionStorage.getItem("color");
+
+if (!userColor) {
+  userColor = `hsl(${Math.random() * 360}, 70%, 50%)`;
+  sessionStorage.setItem("color", userColor);
+}
+
+let width = 2;
+
+// 🔌 CONNECT TO GATEWAY
+const wsHost = window.location.hostname || 'localhost';
+const ws = new WebSocket(`ws://${wsHost}:8080`);
+
+ws.onopen = () => {
+  console.log("Connected to gateway");
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  if (msg.type === "stroke") {
+    if (msg.payload.clear) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    } else {
+      drawLine(msg.payload);
+    }
+  }
+
+  if (msg.type === "init") {
+    const strokes = msg.strokes;
+    strokes.forEach(entry => {
+      if (entry.stroke.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      else drawLine(entry.stroke);
+    });
+  }
+};
+
+// ✏️ DRAW FUNCTION
+function drawLine({ x0, y0, x1, y1, color, width }) {
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+}
+
+// 🖱️ MOUSE EVENTS
+canvas.addEventListener("mousedown", (e) => {
+  drawing = true;
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!drawing) return;
+
+  const x = e.clientX;
+  const y = e.clientY;
+
+  const stroke = {
+    type: "stroke",
+    payload: {
+      x0: lastX,
+      y0: lastY,
+      x1: x,
+      y1: y,
+      color: userColor,
+      width
+    }
+  };
+
+  // draw locally immediately (smooth UX)
+  drawLine(stroke.payload);
+
+  // send to backend
+  ws.send(JSON.stringify(stroke));
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener("mouseup", () => drawing = false);
+canvas.addEventListener("mouseleave", () => drawing = false);
+
+// 📱 TOUCH SUPPORT
+canvas.addEventListener("touchstart", (e) => {
+  const touch = e.touches[0];
+  drawing = true;
+  lastX = touch.clientX;
+  lastY = touch.clientY;
+});
+
+canvas.addEventListener("touchmove", (e) => {
+  if (!drawing) return;
+
+  const touch = e.touches[0];
+  const x = touch.clientX;
+  const y = touch.clientY;
+
+  const stroke = {
+    type: "stroke",
+    payload: {
+      x0: lastX,
+      y0: lastY,
+      x1: x,
+      y1: y,
+      color: userColor,
+      width
+    }
+  };
+
+  drawLine(stroke.payload);
+  ws.send(JSON.stringify(stroke));
+
+  lastX = x;
+  lastY = y;
+});
+
+canvas.addEventListener("touchend", () => drawing = false);
+
+const colorPicker = document.getElementById("colorPicker");
+const brushSize = document.getElementById("brushSize");
+const clearBtn = document.getElementById("clearBtn");
+
+colorPicker.value = userColor;
+
+colorPicker.addEventListener("input", () => {
+  userColor = colorPicker.value;
+  localStorage.setItem("color", userColor);
+});
+
+brushSize.addEventListener("input", () => {
+  width = brushSize.value;
+});
+
+clearBtn.addEventListener("click", () => {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);  // clear locally immediately
+  ws.send(JSON.stringify({ type: "stroke", payload: { clear: true } }));
+});
+
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+}, { passive: false });
+</script>
+
+</body>
+</html>

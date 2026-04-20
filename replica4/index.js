@@ -1,7 +1,11 @@
 const express = require('express');
 const axios = require('axios');
+
 const app = express();
 app.use(express.json());
+
+// ─── Config ──────────────────────────────────────────────────────────────────
+
 const NODE_ID = process.env.NODE_ID;
 const PORT = parseInt(process.env.PORT);
 const PEERS = process.env.PEERS.split(',');
@@ -12,15 +16,13 @@ const QUORUM = Math.floor((PEERS.length + 1) / 2) + 1;  // majority of cluster
 
 const state = {
   nodeId: NODE_ID,
-  role: 'follower',
+  role: 'follower',       // follower | candidate | leader
   currentTerm: 0,
   votedFor: null,
-  log: [],
+  log: [],                // { index, term, stroke }
   commitIndex: -1,
   leaderId: null,
 };
-module.exports = { state, PEERS, GATEWAY_URL };
-const raft = require('./raft');
 
 // Must be exported before require('./raft') — raft.js does require('./index')
 // to grab state/PEERS/GATEWAY_URL. Node resolves the circular dep via the
@@ -43,6 +45,7 @@ app.get('/status', (req, res) => {
   });
 });
 
+// Called by gateway to get full committed log (for new browser clients)
 app.get('/log', (req, res) => {
   const committed = state.log.slice(0, state.commitIndex + 1);
   res.json({ entries: committed });
@@ -121,18 +124,19 @@ app.post('/heartbeat', (req, res) => raft.handleHeartbeat(req, res));
 // RAFT RPC — called by leader to sync log to a rejoining node
 app.post('/sync-log', (req, res) => raft.handleSyncLog(req, res));
 
-app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
-app.post('/append-entries', (req, res) => raft.handleAppendEntries(req, res));
-app.post('/heartbeat', (req, res) => raft.handleHeartbeat(req, res));
-app.post('/sync-log', (req, res) => raft.handleSyncLog(req, res));
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
 function shutdown(signal) {
   console.log(`[${NODE_ID}] ${signal} received — shutting down`);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 2000);
 }
+
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGUSR2', () => shutdown('SIGUSR2'));
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+
 const server = app.listen(PORT, () => {
   console.log(`[${NODE_ID}] running on ${PORT} as ${state.role}`);
 });

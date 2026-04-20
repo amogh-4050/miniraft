@@ -1,105 +1,289 @@
-import express from "express";
-import axios from "axios";
-import { WebSocketServer } from "ws";
+const WebSocket = require('ws');
+const axios = require('axios');
+const http = require('http');
 
-const app = express();
-app.use(express.json());
+// ─── Config ──────────────────────────────────────────────────────────────────
 
-// 🔧 ENV
-const REPLICAS = process.env.REPLICAS.split(",");
-const PORT = process.env.PORT || 8080;
+const PORT = parseInt(process.env.PORT) || 8080;
+const REPLICA_URLS = process.env.REPLICAS.split(',');
 
-// 🧠 Leader tracking
-let currentLeader = null;
+const RPC_TIMEOUT_MS = 300;
+const STATUS_TIMEOUT_MS = 600;   // status polls can afford to wait longer
+const LEADER_POLL_INTERVAL_MS = 100;
+const STROKE_RETRY_LIMIT = 3;
 
-// 🔍 Find current leader
-async function findLeader() {
-    for (const replica of REPLICAS) {
-        try {
-            const res = await axios.get(`${replica}/status`, { timeout: 300 });
+// ─── RPC Client ──────────────────────────────────────────────────────────────
 
-            if (res.data.role === "leader") {
-                currentLeader = replica;
-                console.log(`[gateway] Leader found: ${replica}`);
-                return replica;
-            }
-        } catch (err) {
-            // ignore dead nodes
-        }
-    }
+const rpc = axios.create({
+  timeout: STATUS_TIMEOUT_MS,
+  headers: { 'Content-Type': 'application/json' },
+});
 
-    currentLeader = null;
-    return null;
-}
+const strokeRpc = axios.create({
+  timeout: RPC_TIMEOUT_MS,
+  headers: { 'Content-Type': 'application/json' },
+});
 
-// 🔥 Send request to leader (WITH RETRY)
-async function sendToLeader(path, data) {
-    for (let i = 0; i < 5; i++) {
-        try {
-            if (!currentLeader) {
-                await findLeader();
-            }
 
-            if (!currentLeader) throw new Error("No leader");
+// ─── State ───────────────────────────────────────────────────────────────────
 
-            return await axios.post(`${currentLeader}${path}`, data, {
-                timeout: 500
-            });
+let leaderUrl = null;
+let leaderPollTimer = null;
+let strokeQueue = [];
+let isProcessingQueue = false;
 
-        } catch (err) {
-            console.log(`[gateway] retry ${i + 1}...`);
-            currentLeader = null;
+// ─── Leader Discovery ─────────────────────────────────────────────────────────
 
-            // wait for election
-            await new Promise(res => setTimeout(res, 200));
-        }
-    }
-
-    throw new Error("No leader available after retries");
-}
-
-// 🌐 HTTP route (optional testing)
-app.post("/stroke", async (req, res) => {
+async function discoverLeader() {
+  const polls = REPLICA_URLS.map(async (url) => {
     try {
-        const response = await sendToLeader("/stroke", req.body);
-        res.json(response.data);
-    } catch (err) {
-        res.status(500).json({ error: "No leader available" });
+      const res = await rpc.get(`${url}/status`);
+      return { url, ...res.data };
+    } catch {
+      return null;
     }
+  });
+
+  const statuses = (await Promise.all(polls)).filter(Boolean);
+
+  // Clear stale leaderUrl if that node is no longer responding.
+  // This causes forwardStroke to queue immediately instead of burning 1.2s
+  // retrying against a dead URL, and ensures bestLeader !== leaderUrl triggers
+  // a drain when the new leader is found.
+  if (leaderUrl && !statuses.some(s => s.url === leaderUrl)) {
+    console.log(`[gateway] Leader ${leaderUrl} unreachable — clearing`);
+    leaderUrl = null;
+  }
+
+  let bestLeader = null;
+  let bestTerm = -1;
+
+  for (const s of statuses) {
+    if (s.role === 'leader' && s.term > bestTerm) {
+      bestTerm = s.term;
+      bestLeader = s.url;
+    }
+  }
+
+  if (bestLeader && bestLeader !== leaderUrl) {
+    console.log(`[gateway] Leader: ${leaderUrl ?? 'none'} → ${bestLeader} (term ${bestTerm})`);
+    leaderUrl = bestLeader;
+    drainQueue();
+  } else if (!bestLeader && !leaderUrl) {
+    console.warn('[gateway] No leader detected — cluster unavailable');
+  }
+}
+
+async function schedulePoll() {
+  try {
+    await discoverLeader();
+  } catch (err) {
+    console.error('[gateway] discoverLeader threw:', err.message);
+  }
+  // Drain any strokes that were queued after the last leaderUrl update
+  // (e.g. strokes that finished retrying after the leader-change drain ran)
+  if (leaderUrl && strokeQueue.length > 0) drainQueue();
+  leaderPollTimer = setTimeout(schedulePoll, LEADER_POLL_INTERVAL_MS);
+}
+
+function startLeaderPolling() {
+  schedulePoll();
+}
+// ─── Stroke Forwarding ───────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function forwardStroke(stroke, attempt = 0) {
+  if (!leaderUrl) {
+    strokeQueue.push(stroke);
+    if (attempt === 0) console.warn('[gateway] No leader — stroke queued');
+    return;
+  }
+
+  const targetUrl = leaderUrl;
+  try {
+    await strokeRpc.post(`${targetUrl}/stroke`, { stroke });
+  } catch (err) {
+    if (attempt >= STROKE_RETRY_LIMIT) {
+      strokeQueue.push(stroke);
+      console.warn('[gateway] Stroke queued (leader unreachable)');
+      return;
+    }
+    await sleep(200 * (attempt + 1));
+    await forwardStroke(stroke, attempt + 1);
+  }
+}
+
+async function drainQueue() {
+  if (isProcessingQueue || strokeQueue.length === 0) return;
+  isProcessingQueue = true;
+
+  console.log(`[gateway] Draining ${strokeQueue.length} queued strokes`);
+  while (strokeQueue.length > 0) {
+    if (!leaderUrl) break;
+    const stroke = strokeQueue.shift();
+    try {
+      await strokeRpc.post(`${leaderUrl}/stroke`, { stroke });
+    } catch (err) {
+      // leader gone mid-drain — put it back and stop
+      strokeQueue.unshift(stroke);
+      console.warn('[gateway] Drain interrupted — leader unreachable, will retry on next leader update');
+      break;
+    }
+  }
+
+  isProcessingQueue = false;
+}
+// ─── WebSocket Server ────────────────────────────────────────────────────────
+
+const wss = new WebSocket.Server({ port: PORT });
+const clients = new Set();
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  console.log(`[gateway] Client connected. Total: ${clients.size}`);
+
+  sendCurrentState(ws);
+
+  ws.on('message', (data) => {
+    let msg;
+    try {
+      msg = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (msg.type === 'stroke') forwardStroke(msg.payload);
+  });
+
+  ws.on('close', () => {
+    clients.delete(ws);
+    console.log(`[gateway] Client disconnected. Total: ${clients.size}`);
+  });
+
+  ws.on('error', (err) => {
+    console.warn(`[gateway] WS error: ${err.message}`);
+    clients.delete(ws);
+  });
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 });
 
-// ✅ FIXES YOUR 404 ERROR
-app.post("/leader", (req, res) => {
-    console.log("[gateway] leader update:", req.body);
-    res.json({ status: "ok" });
-});
+// Detect and clean up dead connections
+const wsHeartbeat = setInterval(() => {
+  for (const ws of clients) {
+    if (!ws.isAlive) {
+      ws.terminate();
+      clients.delete(ws);
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 5000);
 
-// 🚀 Start server
-const server = app.listen(PORT, () => {
-    console.log(`[gateway] running on ${PORT}`);
-});
+wss.on('close', () => clearInterval(wsHeartbeat));
 
-// 🔌 WebSocket (for frontend)
-const wss = new WebSocketServer({ server });
+async function sendCurrentState(ws) {
+  if (!leaderUrl) return;
+  try {
+    const res = await rpc.get(`${leaderUrl}/log`);
+    const strokes = res.data.entries || [];
+    if (ws.readyState === WebSocket.OPEN && strokes.length > 0) {
+      ws.send(JSON.stringify({ type: 'init', strokes }));
+    }
+  } catch {
+    // not critical — new client starts with empty canvas
+  }
+}
 
-wss.on("connection", (ws) => {
-    console.log("[gateway] client connected");
+function broadcastToClients(stroke) {
+  const msg = JSON.stringify({ type: 'stroke', payload: stroke });
+  for (const ws of clients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+}
+// ─── Internal HTTP Server (for replicas to push committed strokes) ────────────
 
-    ws.on("message", async (msg) => {
-        try {
-            const data = JSON.parse(msg);
+const internalServer = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/leader') {
+    let body = '';
 
-            const response = await sendToLeader("/stroke", data);
+    req.on('data', chunk => body += chunk);
 
-            // broadcast to all clients
-            wss.clients.forEach(client => {
-                if (client.readyState === 1) {
-                    client.send(JSON.stringify(response.data));
-                }
-            });
+    req.on('end', () => {
+      try {
+        const { leaderUrl: newLeaderUrl } = JSON.parse(body);
 
-        } catch (err) {
-            ws.send(JSON.stringify({ error: "Failed to process request" }));
-        }
+        console.log(`[gateway] Leader updated → ${newLeaderUrl}`);
+
+        leaderUrl = newLeaderUrl;
+
+        drainQueue();
+
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
     });
+
+    return;
+}
+
+
+  if (req.method === 'POST' && req.url === '/broadcast') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { stroke } = JSON.parse(body);
+        broadcastToClients(stroke);
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
+    });
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
 });
+
+internalServer.listen(8081, () => {
+  console.log('[gateway] Internal broadcast endpoint on :8081');
+});
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+
+function shutdown(signal) {
+  console.log(`[gateway] ${signal} received — shutting down`);
+
+  clearTimeout(leaderPollTimer);
+  clearInterval(wsHeartbeat);
+
+  for (const ws of clients) {
+    ws.close(1001, 'Gateway restarting');
+  }
+
+  wss.close(() => {
+    internalServer.close(() => {
+      console.log('[gateway] Clean shutdown complete');
+      process.exit(0);
+    });
+  });
+
+  setTimeout(() => process.exit(1), 2000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGUSR2', () => shutdown('SIGUSR2'));
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+
+startLeaderPolling();
+console.log(`[gateway] WebSocket server on :${PORT}`);

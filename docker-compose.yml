@@ -10,8 +10,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      REPLICAS: "http://replica1:3001,http://replica2:3002,http://replica3:3003"
-      PORT: "8080"
+      - REPLICAS=http://replica1:3001,http://replica2:3002,http://replica3:3003,http://replica4:3004
+      - PORT=8080
     networks:
       - raft-net
     volumes:
@@ -24,15 +24,17 @@ services:
         condition: service_healthy
       replica3:
         condition: service_healthy
+      replica4:
+        condition: service_healthy
     stop_grace_period: 3s
     restart: unless-stopped
 
   replica1:
     build: ./replica1
     environment:
-      NODE_ID: "replica1"
-      PORT: "3001"
-      PEERS: "http://replica2:3002,http://replica3:3003"
+      - NODE_ID=replica1
+      - PORT=3001
+      - PEERS=http://replica2:3002,http://replica3:3003,http://replica4:3004
     networks:
       - raft-net
     volumes:
@@ -52,9 +54,9 @@ services:
   replica2:
     build: ./replica2
     environment:
-      NODE_ID: "replica2"
-      PORT: "3002"
-      PEERS: "http://replica1:3001,http://replica3:3003"
+      - NODE_ID=replica2
+      - PORT=3002
+      - PEERS=http://replica1:3001,http://replica3:3003,http://replica4:3004
     networks:
       - raft-net
     volumes:
@@ -74,9 +76,9 @@ services:
   replica3:
     build: ./replica3
     environment:
-      NODE_ID: "replica3"
-      PORT: "3003"
-      PEERS: "http://replica1:3001,http://replica2:3002"
+      - NODE_ID=replica3
+      - PORT=3003
+      - PEERS=http://replica1:3001,http://replica2:3002,http://replica4:3004
     networks:
       - raft-net
     volumes:
@@ -88,6 +90,28 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3003/status"]
+      interval: 1s
+      timeout: 500ms
+      retries: 5
+      start_period: 5s
+
+  replica4:
+    build: ./replica4
+    environment:
+      - NODE_ID=replica4
+      - PORT=3004
+      - PEERS=http://replica1:3001,http://replica2:3002,http://replica3:3003
+    networks:
+      - raft-net
+    volumes:
+      - ./replica4:/app
+      - /app/node_modules
+    ports:
+      - "3004:3004"
+    stop_grace_period: 3s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3004/status"]
       interval: 1s
       timeout: 500ms
       retries: 5

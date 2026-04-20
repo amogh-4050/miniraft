@@ -31,6 +31,20 @@ Browser(s)
 
 ---
 
+## Open the Frontend
+
+No static server needed — just open the file directly:
+
+```bash
+xdg-open frontend/index.html        # Linux
+open frontend/index.html             # macOS
+# Windows: double-click the file in Explorer
+```
+
+Open the same file in multiple tabs/windows to see real-time sync.
+
+---
+
 ## Setup — Ubuntu / WSL2 (Recommended for all members)
 
 ### 1. Install Docker
@@ -167,18 +181,15 @@ miniraft/
 │   ├── Dockerfile
 │   ├── package.json
 │   ├── pnpm-lock.yaml
-│   └── index.js          ← WebSocket server + leader tracking
-├── replica1/             ← identical structure for 2 and 3
+│   └── index.js          ← WebSocket server, leader polling, stroke queue + broadcast
+├── replica1/             ← identical structure for replica2 and replica3
 │   ├── Dockerfile
 │   ├── package.json
 │   ├── pnpm-lock.yaml
-│   └── index.js          ← Express server + RAFT logic
-├── frontend/
-│   └── index.html        ← Canvas UI
-└── docs/
-    ├── architecture.md
-    ├── api-spec.md
-    └── failure-scenarios.md
+│   ├── index.js          ← Express routes, stroke replication, majority commit
+│   └── raft.js           ← RAFT state machine: election, heartbeat, append-entries
+└── frontend/
+    └── index.html        ← Canvas drawing board, WebSocket client, touch support
 ```
 
 ---
@@ -195,7 +206,11 @@ miniraft/
 | POST | `/heartbeat` | Leader | Keep followers alive |
 | POST | `/sync-log` | Leader | Catch up a rejoining node |
 
-Full schemas in `docs/api-spec.md`.
+Internal gateway broadcast (called by leader after commit):
+
+| Method | Endpoint | Called By | Purpose |
+|---|---|---|---|
+| POST | `/broadcast` | Leader replica | Push committed stroke to all WS clients |
 
 ---
 

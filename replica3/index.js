@@ -5,7 +5,11 @@ app.use(express.json());
 const NODE_ID = process.env.NODE_ID;
 const PORT = parseInt(process.env.PORT);
 const PEERS = process.env.PEERS.split(',');
-const GATEWAY_URL = 'http://gateway:8080';
+const GATEWAY_URL = 'http://gateway:8081';
+const QUORUM = Math.floor((PEERS.length + 1) / 2) + 1;  // majority of cluster
+
+// ─── State ───────────────────────────────────────────────────────────────────
+
 const state = {
   nodeId: NODE_ID,
   role: 'follower',
@@ -18,6 +22,16 @@ const state = {
 module.exports = { state, PEERS, GATEWAY_URL };
 const raft = require('./raft');
 
+// Must be exported before require('./raft') — raft.js does require('./index')
+// to grab state/PEERS/GATEWAY_URL. Node resolves the circular dep via the
+// partial exports object already assigned here.
+module.exports = { state, PEERS, GATEWAY_URL };
+
+const raft = require('./raft');
+
+// ─── Routes ──────────────────────────────────────────────────────────────────
+
+// Called by gateway to check who is leader
 app.get('/status', (req, res) => {
   res.json({
     nodeId: state.nodeId,
@@ -34,6 +48,7 @@ app.get('/log', (req, res) => {
   res.json({ entries: committed });
 });
 
+// Called by gateway to forward a stroke from a browser client
 app.post('/stroke', async (req, res) => {
   if (state.role !== 'leader') {
     return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
@@ -54,11 +69,11 @@ app.post('/stroke', async (req, res) => {
   const prevLogIndex = entry.index - 1;
   const prevLogTerm = prevLogIndex >= 0 ? state.log[prevLogIndex].term : 0;
 
-  let acks = 1; // leader counts as 1
+  let acks = 1; // leader counts itself
 
-  const replicateToPeers = PEERS.map(async (peer) => {
+  await Promise.allSettled(PEERS.map(async (peer) => {
     try {
-      const res2 = await axios.post(`${peer}/append-entries`, {
+      const r = await axios.post(`${peer}/append-entries`, {
         term: state.currentTerm,
         leaderId: NODE_ID,
         entry,
@@ -66,33 +81,45 @@ app.post('/stroke', async (req, res) => {
         prevLogTerm,
         leaderCommit: state.commitIndex,
       }, { timeout: 300 });
-
-      if (res2.data.success) acks += 1;
+      if (r.data.success) {
+        acks += 1;
+      } else if (r.data.logLength !== undefined) {
+        // Follower is behind — kick off catch-up (fire and forget, next stroke will succeed)
+        raft.syncFollower(peer, r.data.logLength);
+      }
     } catch (err) {
       console.log(`[${NODE_ID}] append-entries to ${peer} failed: ${err.message}`);
     }
-  });
+  }));
 
-  await Promise.allSettled(replicateToPeers);
-
-  // Step 3: if majority acked, commit
-  if (acks >= 2) {
-    state.commitIndex = entry.index;
-    console.log(`[${NODE_ID}] stroke committed at index ${entry.index}`);
-
-    // Step 4: tell gateway to broadcast to all browsers
-    try {
-      await axios.post(`${GATEWAY_URL}/broadcast`, { stroke }, { timeout: 300 });
-    } catch (err) {
-      console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`);
-    }
-
-    return res.json({ success: true, index: entry.index });
-  } else {
-    console.log(`[${NODE_ID}] stroke NOT committed (only ${acks} acks)`);
+  // Step 3: majority quorum (≥2 of 3) → commit; otherwise roll back to keep logs in sync
+  if (acks < QUORUM) {
+    state.log.pop();
+    console.log(`[${NODE_ID}] stroke NOT committed (only ${acks} acks) — log rolled back`);
     return res.status(500).json({ error: 'replication failed' });
   }
+
+  state.commitIndex = entry.index;
+  console.log(`[${NODE_ID}] stroke committed at index ${entry.index}`);
+
+  // Step 4: tell gateway to broadcast to all browsers
+  axios.post(`${GATEWAY_URL}/broadcast`, { stroke }, { timeout: 2000 })
+  .catch(err => console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`));
+
+  return res.json({ success: true, index: entry.index });
 });
+
+// RAFT RPC — called by candidates during election
+app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
+
+// RAFT RPC — called by leader to replicate entries
+app.post('/append-entries', (req, res) => raft.handleAppendEntries(req, res));
+
+// RAFT RPC — called by leader to send heartbeats
+app.post('/heartbeat', (req, res) => raft.handleHeartbeat(req, res));
+
+// RAFT RPC — called by leader to sync log to a rejoining node
+app.post('/sync-log', (req, res) => raft.handleSyncLog(req, res));
 
 app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
 app.post('/append-entries', (req, res) => raft.handleAppendEntries(req, res));
