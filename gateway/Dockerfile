@@ -2,7 +2,7 @@ FROM node:20-alpine
 
 # corepack is built into Node 20, use it to enable pnpm
 # this avoids a separate npm install -g pnpm call
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 # Tell pnpm to use this directory as its store
 # so Docker can cache it as a layer

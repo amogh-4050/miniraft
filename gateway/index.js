@@ -155,6 +155,7 @@ wss.on('connection', (ws) => {
       return;
     }
     if (msg.type === 'stroke') forwardStroke(msg.payload);
+    if (msg.type === 'batch') { for (const s of msg.payload) forwardStroke(s); }
   });
 
   ws.on('close', () => {
