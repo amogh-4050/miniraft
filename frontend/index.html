@@ -161,7 +161,8 @@ if (!userColor) {
 }
 
 let width = 2;
-let strokeBuffer = [];
+let strokeBuffer = [];  // outgoing to gateway
+let renderQueue = [];   // incoming from gateway, drained by rAF
 
 // 🔌 CONNECT TO GATEWAY
 const wsHost = window.location.hostname || 'localhost';
@@ -177,24 +178,23 @@ ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
 
   if (msg.type === "stroke") {
-    if (msg.payload.clear) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    } else {
-      drawLine(msg.payload);
+    renderQueue.push(msg.payload);
+  }
+
+  if (msg.type === "stroke-batch") {
+    if (Array.isArray(msg.payload)) {
+      for (const s of msg.payload) renderQueue.push(s);
     }
   }
 
   if (msg.type === "init" || msg.type === "sync") {
     if (!msg.strokes) return;
-    // Clear before replaying — sync may come mid-session after a leader change
+    // Synchronous replay is fine here — full state load, not live drawing
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    msg.strokes.forEach(entry => {
-      if (entry.stroke?.clear) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      } else {
-        drawLine(entry.stroke);
-      }
-    });
+    for (const entry of msg.strokes) {
+      if (entry.stroke?.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      else drawLine(entry.stroke);
+    }
   }
 };
 
@@ -206,11 +206,18 @@ ws.onerror = (err) => {
   console.log("WebSocket error", err);
 };
 
-setInterval(() => {
-  if (strokeBuffer.length === 0 || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "batch", payload: strokeBuffer }));
-  strokeBuffer = [];
-}, 16);
+function rafLoop() {
+  if (strokeBuffer.length > 0 && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "batch", payload: strokeBuffer }));
+    strokeBuffer = [];
+  }
+  if (renderQueue.length > 0) {
+    drawBatch(renderQueue);
+    renderQueue = [];
+  }
+  requestAnimationFrame(rafLoop);
+}
+requestAnimationFrame(rafLoop);
 
 // ✏️ DRAW FUNCTION
 function drawLine({ x0, y0, x1, y1, color, width }) {
@@ -222,6 +229,38 @@ function drawLine({ x0, y0, x1, y1, color, width }) {
   ctx.moveTo(x0, y0);
   ctx.lineTo(x1, y1);
   ctx.stroke();
+}
+
+// Batch draw: groups consecutive same-style connected segments into one path,
+// drastically reducing ctx.stroke() calls on Android where each call is expensive.
+function drawBatch(strokes) {
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  let i = 0;
+  while (i < strokes.length) {
+    const s = strokes[i];
+    if (!s || s.clear) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      i++;
+      continue;
+    }
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.width;
+    ctx.beginPath();
+    ctx.moveTo(s.x0, s.y0);
+    ctx.lineTo(s.x1, s.y1);
+    let px = s.x1, py = s.y1;
+    i++;
+    while (i < strokes.length && !strokes[i].clear &&
+           strokes[i].color === s.color && strokes[i].width === s.width) {
+      const n = strokes[i];
+      if (n.x0 !== px || n.y0 !== py) { ctx.stroke(); ctx.beginPath(); ctx.moveTo(n.x0, n.y0); }
+      ctx.lineTo(n.x1, n.y1);
+      px = n.x1; py = n.y1;
+      i++;
+    }
+    ctx.stroke();
+  }
 }
 
 // 🖱️ MOUSE EVENTS
@@ -259,16 +298,17 @@ canvas.addEventListener("touchstart", (e) => {
 canvas.addEventListener("touchmove", (e) => {
   if (!drawing) return;
 
-  const touch = e.touches[0];
-  const x = touch.clientX;
-  const y = touch.clientY;
-  const payload = { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width };
-
-  drawLine(payload);
-  strokeBuffer.push(payload);
-
-  lastX = x;
-  lastY = y;
+  // getCoalescedEvents recovers intermediate points Android coalesces away
+  const points = e.getCoalescedEvents ? e.getCoalescedEvents() : [e.touches[0]];
+  for (const touch of points) {
+    const x = touch.clientX;
+    const y = touch.clientY;
+    const payload = { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width };
+    drawLine(payload);
+    strokeBuffer.push(payload);
+    lastX = x;
+    lastY = y;
+  }
 });
 
 canvas.addEventListener("touchend", () => drawing = false);
@@ -357,7 +397,7 @@ setInterval(fetchStatus, 3000);
 fetchStatus();
 
 function resizeCanvas() {
-  const ratio = window.devicePixelRatio || 1;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2); // cap at 2x — 3x/4x costs 4-9x canvas area for no visible gain
 
   const temp = document.createElement("canvas");
   temp.width = canvas.width;

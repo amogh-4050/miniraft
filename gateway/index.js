@@ -145,18 +145,48 @@ async function drainQueue() {
   console.log(`[gateway] Draining ${strokeQueue.length} queued strokes`);
   while (strokeQueue.length > 0) {
     if (!leaderUrl) break;
-    const stroke = strokeQueue.shift();
+    // Drain in batches of 20 to stay efficient without hammering the leader
+    const batch = strokeQueue.splice(0, 20);
     try {
-      await strokeRpc.post(`${leaderUrl}/stroke`, { stroke });
+      await strokeRpc.post(`${leaderUrl}/stroke-batch`, { strokes: batch });
     } catch (err) {
-      // leader gone mid-drain — put it back and stop
-      strokeQueue.unshift(stroke);
+      strokeQueue.unshift(...batch);
       console.warn('[gateway] Drain interrupted — leader unreachable, will retry on next leader update');
       break;
     }
   }
 
   isProcessingQueue = false;
+}
+
+// Send a batch of strokes to the leader in one HTTP call instead of N.
+// Eliminates the concurrent-write race that was causing AppendEntries failures.
+async function forwardBatch(strokes, attempt = 0) {
+  if (!leaderUrl) {
+    for (const s of strokes) strokeQueue.push(s);
+    if (attempt === 0) console.warn('[gateway] No leader — batch queued');
+    return;
+  }
+
+  const targetUrl = leaderUrl;
+  try {
+    await strokeRpc.post(`${targetUrl}/stroke-batch`, { strokes });
+  } catch (err) {
+    if (attempt >= STROKE_RETRY_LIMIT) {
+      for (const s of strokes) strokeQueue.push(s);
+      console.warn('[gateway] Batch queued (leader unreachable)');
+      return;
+    }
+    await sleep(100 * (attempt + 1));
+    await forwardBatch(strokes, attempt + 1);
+  }
+}
+
+function broadcastBatchToClients(strokes) {
+  const msg = JSON.stringify({ type: 'stroke-batch', payload: strokes });
+  for (const ws of clients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
 }
 // ─── WebSocket Server ────────────────────────────────────────────────────────
 
@@ -177,7 +207,7 @@ wss.on('connection', (ws) => {
       return;
     }
     if (msg.type === 'stroke') forwardStroke(msg.payload);
-    if (msg.type === 'batch') { for (const s of msg.payload) forwardStroke(s); }
+    if (msg.type === 'batch' && msg.payload.length > 0) forwardBatch(msg.payload);
   });
 
   ws.on('close', () => {
@@ -284,6 +314,20 @@ const internalServer = http.createServer((req, res) => {
       try {
         const { stroke } = JSON.parse(body);
         broadcastToClients(stroke);
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/broadcast-batch') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { strokes } = JSON.parse(body);
+        broadcastBatchToClients(strokes);
         res.writeHead(200);
         res.end('ok');
       } catch {

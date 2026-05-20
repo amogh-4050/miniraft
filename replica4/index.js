@@ -113,6 +113,51 @@ app.post('/stroke', async (req, res) => {
   return res.json({ success: true, index: entry.index });
 });
 
+app.post('/stroke-batch', async (req, res) => {
+  if (state.role !== 'leader') {
+    return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
+  }
+
+  const { strokes } = req.body;
+  if (!Array.isArray(strokes) || strokes.length === 0) {
+    return res.json({ success: true, committed: 0 });
+  }
+
+  const committed = [];
+
+  for (const stroke of strokes) {
+    const entry = { index: state.log.length, term: state.currentTerm, stroke };
+    state.log.push(entry);
+
+    const prevLogIndex = entry.index - 1;
+    const prevLogTerm = prevLogIndex >= 0 ? state.log[prevLogIndex].term : 0;
+    let acks = 1;
+
+    await Promise.allSettled(PEERS.map(async (peer) => {
+      try {
+        const r = await axios.post(`${peer}/append-entries`, {
+          term: state.currentTerm, leaderId: NODE_ID,
+          entry, prevLogIndex, prevLogTerm, leaderCommit: state.commitIndex,
+        }, { timeout: 300 });
+        if (r.data.success) acks++;
+        else if (r.data.logLength !== undefined) raft.syncFollower(peer, r.data.logLength);
+      } catch {}
+    }));
+
+    if (acks < QUORUM) { state.log.pop(); continue; }
+
+    state.commitIndex = entry.index;
+    committed.push(stroke);
+  }
+
+  if (committed.length > 0) {
+    axios.post(`${GATEWAY_URL}/broadcast-batch`, { strokes: committed }, { timeout: 2000 })
+      .catch(err => console.log(`[${NODE_ID}] broadcast-batch failed: ${err.message}`));
+  }
+
+  return res.json({ success: true, committed: committed.length });
+});
+
 // RAFT RPC — called by candidates during election
 app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
 
