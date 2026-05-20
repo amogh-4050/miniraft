@@ -126,7 +126,7 @@ async function forwardStroke(stroke, attempt = 0) {
 
   const targetUrl = leaderUrl;
   try {
-    await strokeRpc.post(`${targetUrl}/stroke`, { stroke });
+    await strokeRpc.post(`${targetUrl}/commit-state`, { stroke });
   } catch (err) {
     if (attempt >= STROKE_RETRY_LIMIT) {
       strokeQueue.push(stroke);
@@ -134,6 +134,7 @@ async function forwardStroke(stroke, attempt = 0) {
       return;
     }
     await sleep(200 * (attempt + 1));
+    await discoverLeader();  // re-discover before retry — don't assume first poll found new leader
     await forwardStroke(stroke, attempt + 1);
   }
 }
@@ -144,11 +145,17 @@ async function drainQueue() {
 
   console.log(`[gateway] Draining ${strokeQueue.length} queued strokes`);
   while (strokeQueue.length > 0) {
-    if (!leaderUrl) break;
-    // Drain in batches of 20 to stay efficient without hammering the leader
+    if (!leaderUrl) {
+      // Fallback: wait 300ms for election to complete, then try once more
+      await sleep(300);
+      if (!leaderUrl) {
+        console.warn('[gateway] Drain aborted — no leader after 300ms, will retry on next leader update');
+        break;
+      }
+    }
     const batch = strokeQueue.splice(0, 20);
     try {
-      await strokeRpc.post(`${leaderUrl}/stroke-batch`, { strokes: batch });
+      await strokeRpc.post(`${leaderUrl}/commit-state-batch`, { strokes: batch });
     } catch (err) {
       strokeQueue.unshift(...batch);
       console.warn('[gateway] Drain interrupted — leader unreachable, will retry on next leader update');
@@ -159,8 +166,6 @@ async function drainQueue() {
   isProcessingQueue = false;
 }
 
-// Send a batch of strokes to the leader in one HTTP call instead of N.
-// Eliminates the concurrent-write race that was causing AppendEntries failures.
 async function forwardBatch(strokes, attempt = 0) {
   if (!leaderUrl) {
     for (const s of strokes) strokeQueue.push(s);
@@ -170,7 +175,7 @@ async function forwardBatch(strokes, attempt = 0) {
 
   const targetUrl = leaderUrl;
   try {
-    await strokeRpc.post(`${targetUrl}/stroke-batch`, { strokes });
+    await strokeRpc.post(`${targetUrl}/commit-state-batch`, { strokes });
   } catch (err) {
     if (attempt >= STROKE_RETRY_LIMIT) {
       for (const s of strokes) strokeQueue.push(s);
@@ -206,8 +211,10 @@ wss.on('connection', (ws) => {
     } catch {
       return;
     }
+    // PATH A — game state (RAFT): clear events, round/score updates
     if (msg.type === 'stroke') forwardStroke(msg.payload);
-    if (msg.type === 'batch' && msg.payload.length > 0) forwardBatch(msg.payload);
+    // PATH B — drawing strokes (best-effort): bypass RAFT, broadcast immediately
+    if (msg.type === 'draw' && Array.isArray(msg.payload) && msg.payload.length > 0) broadcastBatchToClients(msg.payload);
   });
 
   ws.on('close', () => {

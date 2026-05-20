@@ -55,8 +55,8 @@ app.get('/log', (req, res) => {
   res.json({ entries: committed });
 });
 
-// Called by gateway to forward a stroke from a browser client
-app.post('/stroke', async (req, res) => {
+// Called by gateway to commit a game-state event via RAFT
+app.post('/commit-state', async (req, res) => {
   if (state.role !== 'leader') {
     return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
   }
@@ -116,10 +116,7 @@ app.post('/stroke', async (req, res) => {
   return res.json({ success: true, index: entry.index });
 });
 
-// Called by gateway to forward a batch of strokes in one round trip.
-// Processes strokes serially so each AppendEntries uses correct prevLogIndex —
-// concurrent /stroke calls had a race condition that caused quorum failures.
-app.post('/stroke-batch', async (req, res) => {
+app.post('/commit-state-batch', async (req, res) => {
   if (state.role !== 'leader') {
     return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
   }
@@ -169,6 +166,7 @@ app.post('/stroke-batch', async (req, res) => {
 });
 
 // RAFT RPC — called by candidates during election
+
 app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
 
 // RAFT RPC — called by leader to replicate entries

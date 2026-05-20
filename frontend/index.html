@@ -208,7 +208,7 @@ ws.onerror = (err) => {
 
 function rafLoop() {
   if (strokeBuffer.length > 0 && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "batch", payload: strokeBuffer }));
+    ws.send(JSON.stringify({ type: "draw", payload: strokeBuffer }));
     strokeBuffer = [];
   }
   if (renderQueue.length > 0) {
@@ -342,7 +342,6 @@ const replicas = [
   `http://${replicaHost}:3001`,
   `http://${replicaHost}:3002`,
   `http://${replicaHost}:3003`,
-  `http://${replicaHost}:3004`,
 ];
 
 let lastLeader = null;

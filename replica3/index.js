@@ -53,8 +53,8 @@ app.get('/log', (req, res) => {
   res.json({ entries: committed });
 });
 
-// Called by gateway to forward a stroke from a browser client
-app.post('/stroke', async (req, res) => {
+// Called by gateway to commit a game-state event via RAFT
+app.post('/commit-state', async (req, res) => {
   if (state.role !== 'leader') {
     return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
   }
@@ -114,7 +114,7 @@ app.post('/stroke', async (req, res) => {
   return res.json({ success: true, index: entry.index });
 });
 
-app.post('/stroke-batch', async (req, res) => {
+app.post('/commit-state-batch', async (req, res) => {
   if (state.role !== 'leader') {
     return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
   }
