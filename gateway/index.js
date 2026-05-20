@@ -8,15 +8,18 @@ const PORT = parseInt(process.env.PORT) || 8080;
 const REPLICA_URLS = process.env.REPLICAS.split(',');
 
 const RPC_TIMEOUT_MS = 300;
-const STATUS_TIMEOUT_MS = 600;   // status polls can afford to wait longer
+const STATUS_TIMEOUT_MS = 1000;  // generous — replicas may be busy right after election
 const LEADER_POLL_INTERVAL_MS = 100;
 const STROKE_RETRY_LIMIT = 3;
 
 // ─── RPC Client ──────────────────────────────────────────────────────────────
 
+// No keep-alive: after a replica restart the old TCP socket goes stale and
+// subsequent polls over the same connection fail. Fresh sockets per poll avoids this.
 const rpc = axios.create({
   timeout: STATUS_TIMEOUT_MS,
   headers: { 'Content-Type': 'application/json' },
+  httpAgent: new http.Agent({ keepAlive: false }),
 });
 
 const strokeRpc = axios.create({
@@ -34,17 +37,35 @@ let isProcessingQueue = false;
 
 // ─── Leader Discovery ─────────────────────────────────────────────────────────
 
-async function discoverLeader() {
-  const polls = REPLICA_URLS.map(async (url) => {
-    try {
-      const res = await rpc.get(`${url}/status`);
-      return { url, ...res.data };
-    } catch {
-      return null;
-    }
-  });
+// Track consecutive failures per replica so we can use a short timeout for
+// known-dead nodes. Avoids the ~100ms post-abort cleanup window that would
+// otherwise cause subsequent polls to other replicas to also fail.
+const replicaFailCount = new Map();
+const DEAD_REPLICA_TIMEOUT_MS = 100;  // fast-fail replicas that are already down
 
-  const statuses = (await Promise.all(polls)).filter(Boolean);
+// Use native fetch (Node 18+) for status polls — isolated from the axios HTTP
+// agent so a dead replica's timeout can't corrupt the keep-alive socket pool.
+async function pollOne(url) {
+  const failed = replicaFailCount.get(url) > 0;
+  const timeout = failed ? DEAD_REPLICA_TIMEOUT_MS : STATUS_TIMEOUT_MS;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeout);
+  try {
+    const res = await fetch(`${url}/status`, { signal: ac.signal });
+    const data = await res.json();
+    replicaFailCount.set(url, 0);  // reset on success
+    return { url, ...data };
+  } catch {
+    replicaFailCount.set(url, (replicaFailCount.get(url) || 0) + 1);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function discoverLeader() {
+  const results = await Promise.allSettled(REPLICA_URLS.map(url => pollOne(url)));
+  const statuses = results.map(r => r.value).filter(Boolean);
 
   // Clear stale leaderUrl if that node is no longer responding.
   // This causes forwardStroke to queue immediately instead of burning 1.2s
@@ -69,6 +90,7 @@ async function discoverLeader() {
     console.log(`[gateway] Leader: ${leaderUrl ?? 'none'} → ${bestLeader} (term ${bestTerm})`);
     leaderUrl = bestLeader;
     drainQueue();
+    syncAllClients();
   } else if (!bestLeader && !leaderUrl) {
     console.warn('[gateway] No leader detected — cluster unavailable');
   }
@@ -200,6 +222,24 @@ async function sendCurrentState(ws) {
   }
 }
 
+// Re-sync all already-connected clients when a new leader is found.
+// Without this, existing tabs miss strokes drawn during a failover gap.
+async function syncAllClients() {
+  if (!leaderUrl || clients.size === 0) return;
+  try {
+    const res = await rpc.get(`${leaderUrl}/log`);
+    const strokes = res.data.entries || [];
+    if (strokes.length === 0) return;
+    const msg = JSON.stringify({ type: 'sync', strokes });
+    for (const ws of clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+    console.log(`[gateway] Re-synced ${clients.size} client(s) after leader change`);
+  } catch {
+    // non-critical
+  }
+}
+
 function broadcastToClients(stroke) {
   const msg = JSON.stringify({ type: 'stroke', payload: stroke });
   for (const ws of clients) {
@@ -223,6 +263,7 @@ const internalServer = http.createServer((req, res) => {
         leaderUrl = newLeaderUrl;
 
         drainQueue();
+        syncAllClients();
 
         res.writeHead(200);
         res.end('ok');
