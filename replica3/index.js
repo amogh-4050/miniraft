@@ -1,9 +1,9 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+
 const app = express();
 app.use(cors());
-
 app.use(express.json());
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -12,30 +12,91 @@ const NODE_ID = process.env.NODE_ID;
 const PORT = parseInt(process.env.PORT);
 const PEERS = process.env.PEERS.split(',');
 const GATEWAY_URL = 'http://gateway:8081';
-const QUORUM = Math.floor((PEERS.length + 1) / 2) + 1;  // majority of cluster
+const QUORUM = Math.floor((PEERS.length + 1) / 2) + 1;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const state = {
   nodeId: NODE_ID,
-  role: 'follower',       // follower | candidate | leader
+  role: 'follower',
   currentTerm: 0,
   votedFor: null,
-  log: [],                // { index, term, stroke }
+  log: [],          // { index, term, type?, ...eventFields }
   commitIndex: -1,
   leaderId: null,
 };
 
-// Must be exported before require('./raft') — raft.js does require('./index')
-// to grab state/PEERS/GATEWAY_URL. Node resolves the circular dep via the
-// partial exports object already assigned here.
-module.exports = { state, PEERS, GATEWAY_URL };
+// In-memory room state — rebuilt by replaying log entries on leader change
+const rooms = new Map();
+
+function applyRoomEvent(entry) {
+  if (!entry || entry.type !== 'room_event') return;
+  const ev = entry.event;
+  if (ev === 'room_create') {
+    rooms.set(entry.roomCode, {
+      roomCode: entry.roomCode,
+      hostId: entry.hostId,
+      hostName: entry.hostName,
+      players: JSON.parse(JSON.stringify(entry.players)),
+      phase: entry.phase,
+      round: entry.round,
+      scores: { ...entry.scores },
+      createdAt: entry.createdAt,
+    });
+  } else if (ev === 'room_join') {
+    const room = rooms.get(entry.roomCode);
+    if (room) room.players.push({ ...entry.player });
+  } else if (ev === 'room_leave') {
+    const room = rooms.get(entry.roomCode);
+    if (!room) return;
+    const player = room.players.find(p => p.id === entry.playerId);
+    if (player) player.connected = false;
+    if (room.hostId === entry.playerId) {
+      const next = room.players.find(p => p.connected && p.id !== entry.playerId);
+      if (next) { room.hostId = next.id; room.hostName = next.name; }
+    }
+    if (room.players.filter(p => p.connected).length < 2) room.phase = 'waiting';
+  }
+}
+
+// Export before require('./raft') — circular dep resolved via partial exports
+module.exports = { state, PEERS, GATEWAY_URL, rooms, applyRoomEvent };
 
 const raft = require('./raft');
 
+// ─── RAFT commit helper ───────────────────────────────────────────────────────
+
+async function commitEntry(data) {
+  const entry = { index: state.log.length, term: state.currentTerm, ...data };
+  state.log.push(entry);
+  const prevLogIndex = entry.index - 1;
+  const prevLogTerm = prevLogIndex >= 0 ? state.log[prevLogIndex].term : 0;
+  let acks = 1;
+
+  await Promise.allSettled(PEERS.map(async (peer) => {
+    try {
+      const r = await axios.post(`${peer}/append-entries`, {
+        term: state.currentTerm, leaderId: NODE_ID,
+        entry, prevLogIndex, prevLogTerm, leaderCommit: state.commitIndex,
+      }, { timeout: 300 });
+      if (r.data.success) acks++;
+      else if (r.data.logLength !== undefined) raft.syncFollower(peer, r.data.logLength);
+    } catch (err) {
+      console.log(`[${NODE_ID}] append-entries to ${peer} failed: ${err.message}`);
+    }
+  }));
+
+  if (acks < QUORUM) {
+    state.log.pop();
+    return { success: false };
+  }
+  state.commitIndex = entry.index;
+  applyRoomEvent(entry);
+  return { success: true, index: entry.index };
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-// Called by gateway to check who is leader
 app.get('/status', (req, res) => {
   res.json({
     nodeId: state.nodeId,
@@ -47,129 +108,135 @@ app.get('/status', (req, res) => {
   });
 });
 
-// Called by gateway to get full committed log (for new browser clients)
 app.get('/log', (req, res) => {
   const committed = state.log.slice(0, state.commitIndex + 1);
   res.json({ entries: committed });
 });
 
-// Called by gateway to commit a game-state event via RAFT
+// ─── Game-state commit (RAFT path A) ─────────────────────────────────────────
+
 app.post('/commit-state', async (req, res) => {
-  if (state.role !== 'leader') {
-    return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
-  }
+  if (state.role !== 'leader') return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
 
   const { stroke } = req.body;
-  const entry = {
-    index: state.log.length,
-    term: state.currentTerm,
-    stroke,
-  };
-
-  // Step 1: append to own log
-  state.log.push(entry);
-  console.log(`[${NODE_ID}] stroke received, replicating to peers...`);
-
-  // Step 2: send AppendEntries to all peers
-  const prevLogIndex = entry.index - 1;
-  const prevLogTerm = prevLogIndex >= 0 ? state.log[prevLogIndex].term : 0;
-
-  let acks = 1; // leader counts itself
-
-  await Promise.allSettled(PEERS.map(async (peer) => {
-    try {
-      const r = await axios.post(`${peer}/append-entries`, {
-        term: state.currentTerm,
-        leaderId: NODE_ID,
-        entry,
-        prevLogIndex,
-        prevLogTerm,
-        leaderCommit: state.commitIndex,
-      }, { timeout: 300 });
-      if (r.data.success) {
-        acks += 1;
-      } else if (r.data.logLength !== undefined) {
-        // Follower is behind — kick off catch-up (fire and forget, next stroke will succeed)
-        raft.syncFollower(peer, r.data.logLength);
-      }
-    } catch (err) {
-      console.log(`[${NODE_ID}] append-entries to ${peer} failed: ${err.message}`);
-    }
-  }));
-
-  // Step 3: majority quorum (≥2 of 3) → commit; otherwise roll back to keep logs in sync
-  if (acks < QUORUM) {
-    state.log.pop();
-    console.log(`[${NODE_ID}] stroke NOT committed (only ${acks} acks) — log rolled back`);
+  const result = await commitEntry({ stroke });
+  if (!result.success) {
+    console.log(`[${NODE_ID}] stroke NOT committed — log rolled back`);
     return res.status(500).json({ error: 'replication failed' });
   }
-
-  state.commitIndex = entry.index;
-  console.log(`[${NODE_ID}] stroke committed at index ${entry.index}`);
-
-  // Step 4: tell gateway to broadcast to all browsers
+  console.log(`[${NODE_ID}] stroke committed at index ${result.index}`);
   axios.post(`${GATEWAY_URL}/broadcast`, { stroke }, { timeout: 2000 })
-  .catch(err => console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`));
-
-  return res.json({ success: true, index: entry.index });
+    .catch(err => console.log(`[${NODE_ID}] gateway broadcast failed: ${err.message}`));
+  return res.json({ success: true, index: result.index });
 });
 
 app.post('/commit-state-batch', async (req, res) => {
-  if (state.role !== 'leader') {
-    return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
-  }
+  if (state.role !== 'leader') return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
 
   const { strokes } = req.body;
-  if (!Array.isArray(strokes) || strokes.length === 0) {
-    return res.json({ success: true, committed: 0 });
-  }
+  if (!Array.isArray(strokes) || strokes.length === 0) return res.json({ success: true, committed: 0 });
 
   const committed = [];
-
   for (const stroke of strokes) {
-    const entry = { index: state.log.length, term: state.currentTerm, stroke };
-    state.log.push(entry);
-
-    const prevLogIndex = entry.index - 1;
-    const prevLogTerm = prevLogIndex >= 0 ? state.log[prevLogIndex].term : 0;
-    let acks = 1;
-
-    await Promise.allSettled(PEERS.map(async (peer) => {
-      try {
-        const r = await axios.post(`${peer}/append-entries`, {
-          term: state.currentTerm, leaderId: NODE_ID,
-          entry, prevLogIndex, prevLogTerm, leaderCommit: state.commitIndex,
-        }, { timeout: 300 });
-        if (r.data.success) acks++;
-        else if (r.data.logLength !== undefined) raft.syncFollower(peer, r.data.logLength);
-      } catch {}
-    }));
-
-    if (acks < QUORUM) { state.log.pop(); continue; }
-
-    state.commitIndex = entry.index;
+    const result = await commitEntry({ stroke });
+    if (!result.success) continue;
     committed.push(stroke);
   }
 
   if (committed.length > 0) {
+    console.log(`[${NODE_ID}] batch committed ${committed.length}/${strokes.length}`);
     axios.post(`${GATEWAY_URL}/broadcast-batch`, { strokes: committed }, { timeout: 2000 })
       .catch(err => console.log(`[${NODE_ID}] broadcast-batch failed: ${err.message}`));
   }
-
   return res.json({ success: true, committed: committed.length });
 });
 
-// RAFT RPC — called by candidates during election
-app.post('/request-vote', (req, res) => raft.handleRequestVote(req, res));
+// ─── Room endpoints (RAFT path A) ────────────────────────────────────────────
 
-// RAFT RPC — called by leader to replicate entries
+app.post('/room-create', async (req, res) => {
+  if (state.role !== 'leader') return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
+
+  const { hostId, playerName } = req.body;
+  if (!hostId || !playerName) return res.status(400).json({ error: 'hostId and playerName required' });
+
+  const roomCode = Array.from({ length: 6 }, () =>
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[Math.floor(Math.random() * 26)]
+  ).join('');
+
+  const event = {
+    type: 'room_event', event: 'room_create',
+    roomCode, hostId, hostName: playerName,
+    players: [{ id: hostId, name: playerName, connected: true }],
+    phase: 'lobby', round: 0, scores: {}, createdAt: Date.now(),
+  };
+
+  const result = await commitEntry(event);
+  if (!result.success) return res.status(500).json({ error: 'replication failed' });
+
+  const room = rooms.get(roomCode);
+  console.log(`[${NODE_ID}] room ${roomCode} created by ${playerName}`);
+  axios.post(`${GATEWAY_URL}/room-broadcast`, { roomCode, room }, { timeout: 2000 })
+    .catch(() => {});
+  return res.json({ roomCode, playerId: hostId, room });
+});
+
+app.post('/room-join', async (req, res) => {
+  if (state.role !== 'leader') return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
+
+  const { roomCode, playerName, playerId } = req.body;
+  if (!roomCode || !playerName || !playerId) return res.status(400).json({ error: 'roomCode, playerName, playerId required' });
+
+  const room = rooms.get(roomCode);
+  if (!room) return res.status(404).json({ error: 'room not found' });
+  if (room.phase !== 'lobby' && room.phase !== 'waiting') return res.status(400).json({ error: 'room not joinable' });
+
+  const event = {
+    type: 'room_event', event: 'room_join',
+    roomCode, player: { id: playerId, name: playerName, connected: true },
+  };
+
+  const result = await commitEntry(event);
+  if (!result.success) return res.status(500).json({ error: 'replication failed' });
+
+  const updated = rooms.get(roomCode);
+  console.log(`[${NODE_ID}] ${playerName} joined room ${roomCode}`);
+  axios.post(`${GATEWAY_URL}/room-broadcast`, { roomCode, room: updated }, { timeout: 2000 })
+    .catch(() => {});
+  return res.json({ roomCode, playerId, room: updated, currentPlayers: updated.players });
+});
+
+app.post('/room-leave', async (req, res) => {
+  if (state.role !== 'leader') return res.status(403).json({ error: 'not leader', leaderId: state.leaderId });
+
+  const { roomCode, playerId } = req.body;
+  if (!roomCode || !playerId) return res.status(400).json({ error: 'roomCode and playerId required' });
+
+  const room = rooms.get(roomCode);
+  if (!room) return res.json({ success: true });
+
+  const event = { type: 'room_event', event: 'room_leave', roomCode, playerId };
+  const result = await commitEntry(event);
+  if (!result.success) return res.status(500).json({ error: 'replication failed' });
+
+  const updated = rooms.get(roomCode);
+  console.log(`[${NODE_ID}] player ${playerId} left room ${roomCode}`);
+  axios.post(`${GATEWAY_URL}/room-broadcast`, { roomCode, room: updated }, { timeout: 2000 })
+    .catch(() => {});
+  return res.json({ success: true, room: updated });
+});
+
+app.get('/room/:roomCode', (req, res) => {
+  const room = rooms.get(req.params.roomCode);
+  if (!room) return res.status(404).json({ error: 'room not found' });
+  return res.json(room);
+});
+
+// ─── RAFT RPC ─────────────────────────────────────────────────────────────────
+
+app.post('/request-vote',   (req, res) => raft.handleRequestVote(req, res));
 app.post('/append-entries', (req, res) => raft.handleAppendEntries(req, res));
-
-// RAFT RPC — called by leader to send heartbeats
-app.post('/heartbeat', (req, res) => raft.handleHeartbeat(req, res));
-
-// RAFT RPC — called by leader to sync log to a rejoining node
-app.post('/sync-log', (req, res) => raft.handleSyncLog(req, res));
+app.post('/heartbeat',      (req, res) => raft.handleHeartbeat(req, res));
+app.post('/sync-log',       (req, res) => raft.handleSyncLog(req, res));
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 

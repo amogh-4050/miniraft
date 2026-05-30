@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { state, PEERS, GATEWAY_URL } = require('./index');
+const { state, PEERS, GATEWAY_URL, applyRoomEvent } = require('./index');
 
 const HEARTBEAT_INTERVAL = 150;
 const ELECTION_TIMEOUT_MIN = 500;
@@ -170,7 +170,11 @@ function handleAppendEntries(req, res) {
     if (state.log.length <= prevLogIndex || state.log[prevLogIndex].term !== prevLogTerm)
       return res.json({ term: state.currentTerm, success: false, logLength: state.log.length });
   }
-  if (entry) { state.log = state.log.slice(0, prevLogIndex + 1); state.log.push(entry); }
+  if (entry) {
+    state.log = state.log.slice(0, prevLogIndex + 1);
+    state.log.push(entry);
+    applyRoomEvent(entry);
+  }
   if (leaderCommit > state.commitIndex) state.commitIndex = Math.min(leaderCommit, state.log.length - 1);
   return res.json({ term: state.currentTerm, success: true });
 }
@@ -197,9 +201,9 @@ function handleSyncLog(req, res) {
 
   if (entries && entries.length > 0) {
     for (const entry of entries) {
-      // only append entries we don't have yet (idempotent)
       if (entry.index >= state.log.length) {
         state.log.push(entry);
+        applyRoomEvent(entry);
       }
     }
   }

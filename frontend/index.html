@@ -1,249 +1,569 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>MiniRAFT Drawing Board</title>
+  <meta charset="UTF-8">
+  <title>ChromaCast</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <style>
-    body { margin: 0; overflow: hidden; }
-    canvas { background: #fff; display: block; }
-    body { margin: 0; overflow: hidden; background: #121212; }
+    *, *::before, *::after { box-sizing: border-box; }
 
-    canvas { background: #111; display: block; }
+    html, body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background: radial-gradient(circle at top, #1a1a2e, #0f0f1a);
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #fff;
+    }
 
-    #statusPanel {
-    position: fixed;
-    top: 70px;
-    left: 10px;
-    background: rgba(20,20,20,0.9);
-    padding: 10px;
-    border-radius: 10px;
-    color: white;
-    font-size: 14px;
-    min-width: 220px;
-  }
+    /* ── Lobby ─────────────────────────────────────────────────── */
+    #lobby {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 16px;
+    }
+
+    .lobby-card {
+      background: rgba(20, 18, 40, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 32px 28px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+
+    .lobby-card h1 {
+      margin: 0 0 4px;
+      font-size: 26px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .lobby-card p.sub {
+      margin: 0 0 24px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.45);
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 12px;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .field input {
+      width: 100%;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      color: #fff;
+      font-size: 15px;
+      outline: none;
+      transition: border-color .2s;
+    }
+
+    .field input:focus { border-color: rgba(167,139,250,0.6); }
+    .field input::placeholder { color: rgba(255,255,255,0.25); }
+
+    .btn-row { display: flex; gap: 10px; margin-top: 8px; }
+
+    .btn {
+      flex: 1;
+      padding: 11px 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: #fff;
+    }
+
+    #lobbyError {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #f87171;
+      min-height: 18px;
+    }
+
+    /* ── Room screen ───────────────────────────────────────────── */
+    #roomScreen {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    #roomScreen.visible { display: flex; }
+
+    .room-card {
+      background: rgba(20, 18, 40, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 28px 24px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+
+    .room-code-box {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .room-code-box .label {
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 6px;
+    }
+
+    .room-code {
+      font-size: 38px;
+      font-weight: 800;
+      letter-spacing: .2em;
+      background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      cursor: pointer;
+      user-select: all;
+    }
+
+    .room-code-box .copy-hint {
+      font-size: 11px;
+      color: rgba(255,255,255,0.3);
+      margin-top: 4px;
+    }
+
+    .players-title {
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 10px;
+    }
+
+    #playerList {
+      list-style: none;
+      margin: 0 0 20px;
+      padding: 0;
+    }
+
+    #playerList li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: background .15s;
+    }
+
+    #playerList li:hover { background: rgba(255,255,255,0.04); }
+
+    .player-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #4ade80;
+      flex-shrink: 0;
+    }
+
+    .player-dot.offline { background: #6b7280; }
+
+    .player-name { flex: 1; }
+    .player-host-badge {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: rgba(167,139,250,0.25);
+      color: #a78bfa;
+    }
+
+    #waitingMsg {
+      text-align: center;
+      font-size: 13px;
+      color: rgba(255,255,255,0.4);
+      margin-bottom: 16px;
+    }
+
+    #startBtn {
+      display: none;
+      width: 100%;
+      padding: 13px;
+      border: none;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    #startBtn:hover { opacity: .9; }
+    #startBtn:active { transform: scale(.98); }
+
+    /* ── Game UI (hidden until game starts) ────────────────────── */
+    #gameUI { display: none; }
+    #gameUI.visible { display: block; }
+
+    canvas { background: transparent; display: block; }
 
     #toolbar {
       position: fixed;
-      top: 10px;
-      left: 10px;
-      background: rgba(30,30,30,0.9);
-      padding: 10px;
-      border-radius: 10px;
-      color: white;
+      top: 20px;
+      left: 20px;
+      background: rgba(255,255,255,0.05);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 12px 16px;
+      border-radius: 14px;
       display: flex;
-      gap: 10px;
+      gap: 12px;
       align-items: center;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+      z-index: 10;
     }
 
-    body {
-  margin: 0;
-  overflow: hidden;
-  background: radial-gradient(circle at top, #1a1a2e, #0f0f1a);
-  font-family: 'Inter', sans-serif;
-}
+    #toolbar button, #toolbar input[type=color], #toolbar input[type=range] {
+      cursor: pointer;
+    }
+    #toolbar button {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
 
-/* Canvas */
-canvas {
-  background: transparent;
-  display: block;
-}
+    #statusPanel {
+      position: fixed;
+      top: 100px;
+      left: 20px;
+      background: rgba(255,255,255,0.05);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 16px;
+      border-radius: 14px;
+      color: white;
+      min-width: 260px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      z-index: 10;
+    }
 
-/* Toolbar */
-#toolbar {
-  position: fixed;
-  top: 20px;
-  left: 20px;
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255,255,255,0.1);
-  padding: 12px 16px;
-  border-radius: 14px;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  box-shadow: 0 8px 25px rgba(0,0,0,0.4);
-}
+    .status-title { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
 
-/* Status Panel */
-#statusPanel {
-  position: fixed;
-  top: 100px;
-  left: 20px;
-  background: rgba(255,255,255,0.05);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(255,255,255,0.1);
-  padding: 16px;
-  border-radius: 14px;
-  color: white;
-  min-width: 260px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-}
+    .replica {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-radius: 8px;
+      margin-bottom: 5px;
+      transition: all 0.2s ease;
+    }
+    .replica:hover { background: rgba(255,255,255,0.05); }
 
-  /* Title */
-  .status-title {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 10px;
-  }
-
-  /* Replica Row */
-  .replica {
-    display: flex;
-    justify-content: space-between;
-    padding: 6px 8px;
-    border-radius: 8px;
-    margin-bottom: 5px;
-    transition: 0.2s;
-  }
-
-  .replica:hover {
-    background: rgba(255,255,255,0.05);
-  }
-
-  /* Badges */
-  .badge {
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .leader {
-    background: #4CAF50;
-  }
-
-  .follower {
-    background: #555;
-  }
-
-  .candidate {
-    background: #FFC107;
-  }
-
-  .down {
-    background: #f44336;
-  }
-
-  .leader {
-    background: #4CAF50;
-    box-shadow: 0 0 10px rgba(76,175,80,0.7);
-  }
-
-  .replica {
-    transition: all 0.2s ease;
-  }
+    .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+    .leader { background: #4CAF50; box-shadow: 0 0 10px rgba(76,175,80,0.7); }
+    .follower { background: #555; }
+    .candidate { background: #FFC107; }
+    .down { background: #f44336; }
   </style>
 </head>
 <body>
-<div id="toolbar">
-  <input type="color" id="colorPicker">
-  <input type="range" id="brushSize" min="1" max="10" value="2">
-  <button id="clearBtn">Clear</button>
+
+<!-- ── Lobby screen ──────────────────────────────────────────────────────── -->
+<div id="lobby">
+  <div class="lobby-card">
+    <h1>ChromaCast</h1>
+    <p class="sub">Collaborative drawing, distributed consensus</p>
+
+    <div class="field">
+      <label>Your Name</label>
+      <input type="text" id="playerNameInput" placeholder="Enter your name" maxlength="24" autocomplete="off">
+    </div>
+
+    <div class="field">
+      <label>Room Code <span style="color:rgba(255,255,255,.3);font-weight:400">(leave blank to create)</span></label>
+      <input type="text" id="roomCodeInput" placeholder="XXXXXX" maxlength="6"
+        style="text-transform:uppercase;letter-spacing:.15em;font-weight:700">
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="joinBtn">Join / Create</button>
+    </div>
+    <div id="lobbyError"></div>
+  </div>
 </div>
-<canvas id="board"></canvas>
-<div id="statusPanel"></div>
+
+<!-- ── Room waiting screen ───────────────────────────────────────────────── -->
+<div id="roomScreen">
+  <div class="room-card">
+    <div class="room-code-box">
+      <div class="label">Room Code</div>
+      <div class="room-code" id="roomCodeDisplay" title="Click to copy"></div>
+      <div class="copy-hint">tap to copy</div>
+    </div>
+
+    <div class="players-title">Players</div>
+    <ul id="playerList"></ul>
+
+    <div id="waitingMsg">Waiting for more players...</div>
+    <button id="startBtn">Start Game</button>
+  </div>
+</div>
+
+<!-- ── Game UI ───────────────────────────────────────────────────────────── -->
+<div id="gameUI">
+  <div id="toolbar">
+    <input type="color" id="colorPicker">
+    <input type="range" id="brushSize" min="1" max="10" value="2">
+    <button id="clearBtn">Clear</button>
+  </div>
+  <canvas id="board"></canvas>
+  <div id="statusPanel"></div>
+</div>
 
 <script>
-const canvas = document.getElementById("board");
-const ctx = canvas.getContext("2d");
+const DEV_MODE = true;
 
-resizeCanvas();
-
-let drawing = false;
-let lastX = 0;
-let lastY = 0;
-
-// CONFIG
-let userColor = sessionStorage.getItem("color");
-
-if (!userColor) {
-  userColor = `hsl(${Math.random() * 360}, 70%, 50%)`;
-  sessionStorage.setItem("color", userColor);
-}
-
-let width = 2;
-let strokeBuffer = [];  // outgoing to gateway
-let renderQueue = [];   // incoming from gateway, drained by rAF
-
-// 🔌 CONNECT TO GATEWAY
+// ── WebSocket ────────────────────────────────────────────────────────────────
 const wsHost = window.location.hostname || 'localhost';
 const ws = new WebSocket(`ws://${wsHost}:8080`);
 
+// ── Room state ───────────────────────────────────────────────────────────────
+let myPlayerId = null;
+let myRoomCode = null;
+let myRoomState = { players: [], hostId: null };
+
+// ── Lobby logic ──────────────────────────────────────────────────────────────
+const lobby       = document.getElementById('lobby');
+const roomScreen  = document.getElementById('roomScreen');
+const gameUI      = document.getElementById('gameUI');
+const joinBtn     = document.getElementById('joinBtn');
+const lobbyError  = document.getElementById('lobbyError');
+
+joinBtn.addEventListener('click', () => {
+  const name = document.getElementById('playerNameInput').value.trim();
+  const code = document.getElementById('roomCodeInput').value.trim().toUpperCase();
+  if (!name) { lobbyError.textContent = 'Please enter your name.'; return; }
+  lobbyError.textContent = '';
+  joinBtn.disabled = true;
+  joinBtn.textContent = 'Connecting...';
+  ws.send(JSON.stringify({ type: 'room_join', playerName: name, roomCode: code || undefined }));
+});
+
+document.getElementById('playerNameInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') joinBtn.click();
+});
+document.getElementById('roomCodeInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') joinBtn.click();
+});
+
+// ── Room screen logic ────────────────────────────────────────────────────────
+const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+const playerList      = document.getElementById('playerList');
+const waitingMsg      = document.getElementById('waitingMsg');
+const startBtn        = document.getElementById('startBtn');
+
+roomCodeDisplay.addEventListener('click', () => {
+  navigator.clipboard?.writeText(myRoomCode).catch(() => {});
+});
+
+function renderPlayers(players, hostId) {
+  playerList.innerHTML = '';
+  for (const p of players) {
+    const li = document.createElement('li');
+    const dot = document.createElement('span');
+    dot.className = 'player-dot' + (p.connected ? '' : ' offline');
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'player-name';
+    nameSpan.textContent = p.name + (p.id === myPlayerId ? ' (you)' : '');
+    li.appendChild(dot);
+    li.appendChild(nameSpan);
+    if (p.id === hostId) {
+      const badge = document.createElement('span');
+      badge.className = 'player-host-badge';
+      badge.textContent = 'host';
+      li.appendChild(badge);
+    }
+    playerList.appendChild(li);
+  }
+
+  const connected = players.filter(p => p.connected).length;
+  const amHost = hostId === myPlayerId;
+
+  waitingMsg.textContent = connected < 2
+    ? 'Waiting for at least 2 players...'
+    : amHost ? 'Ready to start!' : 'Waiting for host to start...';
+
+  startBtn.style.display = (amHost && connected >= 2) ? 'block' : 'none';
+}
+
+startBtn.addEventListener('click', () => {
+  ws.send(JSON.stringify({ type: 'room_start', roomCode: myRoomCode }));
+  showGame();
+});
+
+function showRoom(roomCode, players, hostId) {
+  lobby.style.display = 'none';
+  roomScreen.classList.add('visible');
+  roomCodeDisplay.textContent = roomCode;
+  renderPlayers(players, hostId);
+}
+
+function showGame() {
+  roomScreen.classList.remove('visible');
+  gameUI.classList.add('visible');
+  resizeCanvas();
+}
+
+// ── WebSocket messages ───────────────────────────────────────────────────────
 ws.onopen = () => {
-  console.log("Connected to gateway");
-  ws.send(JSON.stringify({ type: "init_request" }));
-  
+  console.log('Connected to gateway');
+  if (DEV_MODE) {
+    myPlayerId = Math.random().toString(36).slice(2);
+    myRoomCode = 'DEVROOM';
+    lobby.style.display = 'none';
+    showGame();
+  }
 };
 
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
 
-  if (msg.type === "stroke") {
+  if (msg.type === 'room_joined') {
+    myPlayerId = msg.playerId;
+    myRoomCode = msg.roomCode;
+    myRoomState = { players: msg.players, hostId: msg.hostId };
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'Join / Create';
+    showRoom(msg.roomCode, msg.players, msg.hostId);
+  }
+
+  if (msg.type === 'game_start') {
+    if (msg.roomCode === myRoomCode) showGame();
+  }
+
+  if (msg.type === 'room_update') {
+    if (msg.roomCode !== myRoomCode) return;
+    myRoomState = { players: msg.players, hostId: msg.hostId };
+    renderPlayers(msg.players, msg.hostId);
+  }
+
+  if (msg.type === 'error') {
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'Join / Create';
+    lobbyError.textContent = msg.message || 'Something went wrong.';
+  }
+
+  // ── Drawing messages ───────────────────────────────────────────
+  if (msg.type === 'stroke') {
     renderQueue.push(msg.payload);
   }
 
-  if (msg.type === "stroke-batch") {
+  if (msg.type === 'stroke-batch') {
     if (Array.isArray(msg.payload)) {
       for (const s of msg.payload) renderQueue.push(s);
     }
   }
 
-  if (msg.type === "init" || msg.type === "sync") {
+  if (msg.type === 'init' || msg.type === 'sync') {
     if (!msg.strokes) return;
-    // Synchronous replay is fine here — full state load, not live drawing
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const entry of msg.strokes) {
       if (entry.stroke?.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      else drawLine(entry.stroke);
+      else if (entry.stroke) drawLine(entry.stroke);
     }
   }
 };
 
-ws.onclose = () => {
-  console.log("WebSocket disconnected");
-};
+ws.onclose = () => console.log('WebSocket disconnected');
+ws.onerror = (err) => console.log('WebSocket error', err);
 
-ws.onerror = (err) => {
-  console.log("WebSocket error", err);
-};
+// ── Canvas / Drawing ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
 
-function rafLoop() {
-  if (strokeBuffer.length > 0 && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "draw", payload: strokeBuffer }));
-    strokeBuffer = [];
-  }
-  if (renderQueue.length > 0) {
-    drawBatch(renderQueue);
-    renderQueue = [];
-  }
-  requestAnimationFrame(rafLoop);
+let drawing = false;
+let lastX = 0, lastY = 0;
+
+let userColor = sessionStorage.getItem('color');
+if (!userColor) {
+  userColor = `hsl(${Math.random() * 360}, 70%, 50%)`;
+  sessionStorage.setItem('color', userColor);
 }
-requestAnimationFrame(rafLoop);
 
-// ✏️ DRAW FUNCTION
-function drawLine({ x0, y0, x1, y1, color, width }) {
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+let width = 2;
+let strokeBuffer = [];
+let renderQueue = [];
+
+function denormStroke(s) {
+  // Coords in 0-1 range = normalized; multiply back to canvas pixels
+  if (s.x0 <= 1.0 && s.y0 <= 1.0 && s.x1 <= 1.0 && s.y1 <= 1.0) {
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    return { ...s,
+      x0: s.x0 * cw, y0: s.y0 * ch,
+      x1: s.x1 * cw, y1: s.y1 * ch,
+      width: s.width * Math.max(cw, ch),
+    };
+  }
+  return s;
+}
+
+function drawLine(stroke) {
+  const { x0, y0, x1, y1, color, width: w } = denormStroke(stroke);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
   ctx.strokeStyle = color;
-  ctx.lineWidth = width;
+  ctx.lineWidth = w;
   ctx.beginPath();
   ctx.moveTo(x0, y0);
   ctx.lineTo(x1, y1);
   ctx.stroke();
 }
 
-// Batch draw: groups consecutive same-style connected segments into one path,
-// drastically reducing ctx.stroke() calls on Android where each call is expensive.
 function drawBatch(strokes) {
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
   let i = 0;
   while (i < strokes.length) {
-    const s = strokes[i];
-    if (!s || s.clear) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      i++;
-      continue;
-    }
+    const raw = strokes[i];
+    if (!raw || raw.clear) { ctx.clearRect(0, 0, canvas.width, canvas.height); i++; continue; }
+    const s = denormStroke(raw);
     ctx.strokeStyle = s.color;
     ctx.lineWidth = s.width;
     ctx.beginPath();
@@ -252,8 +572,8 @@ function drawBatch(strokes) {
     let px = s.x1, py = s.y1;
     i++;
     while (i < strokes.length && !strokes[i].clear &&
-           strokes[i].color === s.color && strokes[i].width === s.width) {
-      const n = strokes[i];
+           strokes[i].color === s.color && strokes[i].width === raw.width) {
+      const n = denormStroke(strokes[i]);
       if (n.x0 !== px || n.y0 !== py) { ctx.stroke(); ctx.beginPath(); ctx.moveTo(n.x0, n.y0); }
       ctx.lineTo(n.x1, n.y1);
       px = n.x1; py = n.y1;
@@ -263,93 +583,91 @@ function drawBatch(strokes) {
   }
 }
 
-// 🖱️ MOUSE EVENTS
-canvas.addEventListener("mousedown", (e) => {
-  drawing = true;
-  lastX = e.clientX;
-  lastY = e.clientY;
-});
+function rafLoop() {
+  if (strokeBuffer.length > 0 && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'draw', payload: strokeBuffer }));
+    strokeBuffer = [];
+  }
+  if (renderQueue.length > 0) { drawBatch(renderQueue); renderQueue = []; }
+  requestAnimationFrame(rafLoop);
+}
+requestAnimationFrame(rafLoop);
 
-canvas.addEventListener("mousemove", (e) => {
+// Mouse
+canvas.addEventListener('mousedown', (e) => { drawing = true; lastX = e.clientX; lastY = e.clientY; });
+canvas.addEventListener('mousemove', (e) => {
   if (!drawing) return;
-
-  const x = e.clientX;
-  const y = e.clientY;
-  const payload = { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width };
-
-  drawLine(payload);          // local draw — immediate, smooth
-  strokeBuffer.push(payload); // batched send every 16ms
-
-  lastX = x;
-  lastY = y;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  drawLine({ x0: lastX, y0: lastY, x1: e.clientX, y1: e.clientY, color: userColor, width });
+  strokeBuffer.push({
+    x0: lastX / cw, y0: lastY / ch, x1: e.clientX / cw, y1: e.clientY / ch,
+    color: userColor, width: width / Math.max(cw, ch),
+  });
+  lastX = e.clientX; lastY = e.clientY;
 });
+canvas.addEventListener('mouseup', () => drawing = false);
+canvas.addEventListener('mouseleave', () => drawing = false);
 
-canvas.addEventListener("mouseup", () => drawing = false);
-canvas.addEventListener("mouseleave", () => drawing = false);
-
-// 📱 TOUCH SUPPORT
-canvas.addEventListener("touchstart", (e) => {
-  const touch = e.touches[0];
-  drawing = true;
-  lastX = touch.clientX;
-  lastY = touch.clientY;
+// Touch
+canvas.addEventListener('touchstart', (e) => {
+  const t = e.touches[0];
+  drawing = true; lastX = t.clientX; lastY = t.clientY;
 });
-
-canvas.addEventListener("touchmove", (e) => {
+canvas.addEventListener('touchmove', (e) => {
   if (!drawing) return;
-
-  // getCoalescedEvents recovers intermediate points Android coalesces away
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
   const points = e.getCoalescedEvents ? e.getCoalescedEvents() : [e.touches[0]];
-  for (const touch of points) {
-    const x = touch.clientX;
-    const y = touch.clientY;
-    const payload = { x0: lastX, y0: lastY, x1: x, y1: y, color: userColor, width };
-    drawLine(payload);
-    strokeBuffer.push(payload);
-    lastX = x;
-    lastY = y;
+  for (const t of points) {
+    drawLine({ x0: lastX, y0: lastY, x1: t.clientX, y1: t.clientY, color: userColor, width });
+    strokeBuffer.push({
+      x0: lastX / cw, y0: lastY / ch, x1: t.clientX / cw, y1: t.clientY / ch,
+      color: userColor, width: width / Math.max(cw, ch),
+    });
+    lastX = t.clientX; lastY = t.clientY;
   }
 });
+canvas.addEventListener('touchend', () => drawing = false);
+canvas.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
 
-canvas.addEventListener("touchend", () => drawing = false);
-
-const colorPicker = document.getElementById("colorPicker");
-const brushSize = document.getElementById("brushSize");
-const clearBtn = document.getElementById("clearBtn");
-
+// Toolbar
+const colorPicker = document.getElementById('colorPicker');
+const brushSize   = document.getElementById('brushSize');
+const clearBtn    = document.getElementById('clearBtn');
 colorPicker.value = userColor;
-
-colorPicker.addEventListener("input", () => {
-  userColor = colorPicker.value;
-  localStorage.setItem("color", userColor);
+colorPicker.addEventListener('input', () => { userColor = colorPicker.value; sessionStorage.setItem('color', userColor); });
+brushSize.addEventListener('input', () => { width = brushSize.value; });
+clearBtn.addEventListener('click', () => {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ws.send(JSON.stringify({ type: 'stroke', payload: { clear: true } }));
 });
 
-brushSize.addEventListener("input", () => {
-  width = brushSize.value;
-});
+// ── Canvas resize ─────────────────────────────────────────────────────────────
+function resizeCanvas() {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const temp = document.createElement('canvas');
+  temp.width = canvas.width; temp.height = canvas.height;
+  temp.getContext('2d').drawImage(canvas, 0, 0);
+  canvas.width = window.innerWidth * ratio;
+  canvas.height = window.innerHeight * ratio;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.drawImage(temp, 0, 0);
+}
+window.addEventListener('resize', resizeCanvas);
 
-clearBtn.addEventListener("click", () => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);  // clear locally immediately
-  ws.send(JSON.stringify({ type: "stroke", payload: { clear: true } }));
-});
-
-canvas.addEventListener("touchmove", (e) => {
-  e.preventDefault();
-}, { passive: false });
-
+// ── Cluster status panel ──────────────────────────────────────────────────────
 const replicaHost = window.location.hostname || 'localhost';
 const replicas = [
   `http://${replicaHost}:3001`,
   `http://${replicaHost}:3002`,
   `http://${replicaHost}:3003`,
 ];
-
 let lastLeader = null;
 
 async function fetchStatus() {
-  const panel = document.getElementById("statusPanel");
-
-  let html = `<div class="status-title">⚡ Cluster Status</div>`;
+  const panel = document.getElementById('statusPanel');
+  let html = `<div class="status-title">Cluster Status</div>`;
   let currentLeader = null;
 
   const results = await Promise.allSettled(
@@ -361,62 +679,25 @@ async function fetchStatus() {
   results.forEach((result, i) => {
     const url = replicas[i];
     if (result.status === 'fulfilled') {
-      const data = result.value;
-      let roleClass = "follower";
-      let label = "Follower";
-      if (data.role === "leader") { roleClass = "leader"; label = "Leader 👑"; currentLeader = data.nodeId; }
-      if (data.role === "candidate") { roleClass = "candidate"; label = "Candidate"; }
-      html += `
-        <div class="replica">
-          <span>${data.nodeId}</span>
-          <span class="badge ${roleClass}">${label}</span>
-        </div>
-      `;
+      const d = result.value;
+      let cls = 'follower', label = 'Follower';
+      if (d.role === 'leader')    { cls = 'leader';    label = 'Leader'; currentLeader = d.nodeId; }
+      if (d.role === 'candidate') { cls = 'candidate'; label = 'Candidate'; }
+      html += `<div class="replica"><span>${d.nodeId}</span><span class="badge ${cls}">${label}</span></div>`;
     } else {
-      html += `
-        <div class="replica">
-          <span>${url.split(":").pop()}</span>
-          <span class="badge down">DOWN ❌</span>
-        </div>
-      `;
+      html += `<div class="replica"><span>${url.split(':').pop()}</span><span class="badge down">DOWN ❌</span></div>`;
     }
   });
 
   if (currentLeader !== lastLeader) {
-    html += `<div style="margin-top:10px;font-size:12px;opacity:0.7">
-      Leader changed → ${currentLeader}
-    </div>`;
+    html += `<div style="margin-top:10px;font-size:12px;opacity:0.7">Leader → ${currentLeader}</div>`;
     lastLeader = currentLeader;
   }
-
   panel.innerHTML = html;
 }
 
 setInterval(fetchStatus, 3000);
 fetchStatus();
-
-function resizeCanvas() {
-  const ratio = Math.min(window.devicePixelRatio || 1, 2); // cap at 2x — 3x/4x costs 4-9x canvas area for no visible gain
-
-  const temp = document.createElement("canvas");
-  temp.width = canvas.width;
-  temp.height = canvas.height;
-  temp.getContext("2d").drawImage(canvas, 0, 0);
-
-  canvas.width = window.innerWidth * ratio;
-  canvas.height = window.innerHeight * ratio;
-
-  canvas.style.width = window.innerWidth + "px";
-  canvas.style.height = window.innerHeight + "px";
-
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-
-  ctx.drawImage(temp, 0, 0);
-}
-
-// 🔥 listen to resize
-window.addEventListener("resize", resizeCanvas);
 </script>
-
 </body>
 </html>
