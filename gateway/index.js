@@ -36,6 +36,7 @@ let leaderUrl = null;
 let leaderPollTimer = null;
 let strokeQueue = [];
 let isProcessingQueue = false;
+let strokeHistory = [];   // in-memory canvas state for catch-up on reconnect
 
 // Room membership tracking
 const roomClients = new Map();   // roomCode → Set<ws>
@@ -178,6 +179,8 @@ async function forwardToLeader(path, body, attempt = 0) {
 // ─── Broadcast Helpers ────────────────────────────────────────────────────────
 
 function broadcastToClients(stroke) {
+  if (stroke.clear) strokeHistory = [];
+  else strokeHistory.push(stroke);
   const msg = JSON.stringify({ type: 'stroke', payload: stroke });
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) ws.send(msg);
@@ -185,6 +188,10 @@ function broadcastToClients(stroke) {
 }
 
 function broadcastBatchToClients(strokes) {
+  for (const s of strokes) {
+    if (s.clear) strokeHistory = [];
+    else strokeHistory.push(s);
+  }
   const msg = JSON.stringify({ type: 'stroke-batch', payload: strokes });
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) ws.send(msg);
@@ -323,29 +330,19 @@ const wsHeartbeat = setInterval(() => {
 
 wss.on('close', () => clearInterval(wsHeartbeat));
 
-async function sendCurrentState(ws) {
-  if (!leaderUrl) return;
-  try {
-    const res = await rpc.get(`${leaderUrl}/log`);
-    const strokes = res.data.entries || [];
-    if (ws.readyState === WebSocket.OPEN && strokes.length > 0) {
-      ws.send(JSON.stringify({ type: 'init', strokes }));
-    }
-  } catch { /* non-critical */ }
+function sendCurrentState(ws) {
+  if (ws.readyState !== WebSocket.OPEN || strokeHistory.length === 0) return;
+  // wrap each raw stroke as { stroke } so the frontend init handler can replay it
+  ws.send(JSON.stringify({ type: 'init', strokes: strokeHistory.map(s => ({ stroke: s })) }));
 }
 
-async function syncAllClients() {
-  if (!leaderUrl || clients.size === 0) return;
-  try {
-    const res = await rpc.get(`${leaderUrl}/log`);
-    const strokes = res.data.entries || [];
-    if (strokes.length === 0) return;
-    const msg = JSON.stringify({ type: 'sync', strokes });
-    for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-    }
-    console.log(`[gateway] Re-synced ${clients.size} client(s) after leader change`);
-  } catch { /* non-critical */ }
+function syncAllClients() {
+  if (clients.size === 0 || strokeHistory.length === 0) return;
+  const msg = JSON.stringify({ type: 'sync', strokes: strokeHistory.map(s => ({ stroke: s })) });
+  for (const ws of clients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+  console.log(`[gateway] Re-synced ${clients.size} client(s) — ${strokeHistory.length} strokes`);
 }
 
 // ─── Internal HTTP Server ────────────────────────────────────────────────────

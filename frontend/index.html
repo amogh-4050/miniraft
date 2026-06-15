@@ -43,6 +43,7 @@
       font-size: 26px;
       font-weight: 700;
       background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -156,6 +157,7 @@
       font-weight: 800;
       letter-spacing: .2em;
       background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       cursor: pointer;
@@ -362,7 +364,8 @@ const DEV_MODE = true;
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
 const wsHost = window.location.hostname || 'localhost';
-const ws = new WebSocket(`ws://${wsHost}:8080`);
+let ws;
+let wsReconnectTimer = null;
 
 // ── Room state ───────────────────────────────────────────────────────────────
 let myPlayerId = null;
@@ -451,18 +454,37 @@ function showGame() {
   resizeCanvas();
 }
 
-// ── WebSocket messages ───────────────────────────────────────────────────────
-ws.onopen = () => {
-  console.log('Connected to gateway');
-  if (DEV_MODE) {
-    myPlayerId = Math.random().toString(36).slice(2);
-    myRoomCode = 'DEVROOM';
-    lobby.style.display = 'none';
-    showGame();
-  }
-};
+// ── WebSocket connect / reconnect ────────────────────────────────────────────
+function connectWS() {
+  clearTimeout(wsReconnectTimer);
+  ws = new WebSocket(`ws://${wsHost}:8080`);
 
-ws.onmessage = (event) => {
+  ws.onopen = () => {
+    console.log('[ws] connected');
+    if (DEV_MODE) {
+      if (!myPlayerId) {
+        myPlayerId = Math.random().toString(36).slice(2);
+        myRoomCode = 'DEVROOM';
+        lobby.style.display = 'none';
+        showGame();
+      }
+      // else: reconnect after drop — init message will repaint canvas
+    } else if (myPlayerId) {
+      // reconnect mid-game: skip lobby, restore game view
+      lobby.style.display = 'none';
+      roomScreen.classList.remove('visible');
+      gameUI.classList.add('visible');
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('[ws] disconnected — reconnecting in 2s');
+    wsReconnectTimer = setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = (err) => console.log('[ws] error', err);
+
+  ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
 
   if (msg.type === 'room_joined') {
@@ -504,15 +526,33 @@ ws.onmessage = (event) => {
   if (msg.type === 'init' || msg.type === 'sync') {
     if (!msg.strokes) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const entry of msg.strokes) {
+    replayStrokes(msg.strokes);
+  }
+  };
+}
+
+// Replay catch-up strokes smoothly, capped at 2 seconds total
+function replayStrokes(strokes) {
+  if (strokes.length === 0) return;
+  const TOTAL_MS = Math.min(2000, Math.max(300, strokes.length * 4));
+  let drawn = 0;
+  const start = performance.now();
+
+  function tick() {
+    const elapsed = performance.now() - start;
+    const target = Math.min(Math.floor((elapsed / TOTAL_MS) * strokes.length), strokes.length);
+    while (drawn < target) {
+      const entry = strokes[drawn++];
       if (entry.stroke?.clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
       else if (entry.stroke) drawLine(entry.stroke);
     }
+    if (drawn < strokes.length) requestAnimationFrame(tick);
   }
-};
 
-ws.onclose = () => console.log('WebSocket disconnected');
-ws.onerror = (err) => console.log('WebSocket error', err);
+  requestAnimationFrame(tick);
+}
+
+connectWS();
 
 // ── Canvas / Drawing ─────────────────────────────────────────────────────────
 const canvas = document.getElementById('board');
